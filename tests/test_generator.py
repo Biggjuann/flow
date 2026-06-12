@@ -28,8 +28,13 @@ def test_generate_ads_two_batches_with_ids(brand_dna):
         assert brand_dna.business_name in call["user"]
 
     # each batch is assigned a disjoint half of the framework library
+    # (batches run on threads, so call order is not deterministic)
     assigned = [call["user"] for call in llm.calls]
-    assert "pas" in assigned[0] and "founder_story" in assigned[1]
+    pas_calls = [u for u in assigned if "Assigned hook frameworks: pas," in u]
+    founder_calls = [u for u in assigned if "founder_story" in u]
+    assert len(pas_calls) == 1
+    assert len(founder_calls) == 1
+    assert pas_calls[0] is not founder_calls[0]
 
 
 def test_framework_sets_are_disjoint_and_complete():
