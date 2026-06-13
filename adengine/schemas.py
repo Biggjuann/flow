@@ -31,6 +31,7 @@ class ConversionPath(str, enum.Enum):
     purchase = "purchase"
     booking = "booking"
     call = "call"
+    app_install = "app_install"
 
 
 class HookFramework(str, enum.Enum):
@@ -63,6 +64,9 @@ class CTAButton(str, enum.Enum):
     DOWNLOAD = "DOWNLOAD"
     GET_OFFER = "GET_OFFER"
     APPLY_NOW = "APPLY_NOW"
+    INSTALL_MOBILE_APP = "INSTALL_MOBILE_APP"
+    USE_APP = "USE_APP"
+    PLAY_GAME = "PLAY_GAME"
 
 
 class Verdict(str, enum.Enum):

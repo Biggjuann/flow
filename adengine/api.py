@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from adengine import launcher as meta_launcher
 from adengine import pipeline
+from adengine.schemas import ConversionPath
 
 RUNS_BASE = Path(os.environ.get("ADENGINE_RUNS_DIR", "runs"))
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -99,6 +100,12 @@ def healthz() -> dict:
             os.environ.get(var)
             for var in ("META_ACCESS_TOKEN", "META_AD_ACCOUNT_ID", "META_PAGE_ID")
         ),
+        "pixel_configured": bool(os.environ.get("META_PIXEL_ID")),
+        "app_id_configured": bool(os.environ.get("META_APP_ID")),
+        "images_configured": bool(
+            (os.environ.get("ADENGINE_IMAGE_PROVIDER") or "").lower() == "openai"
+            and (os.environ.get("OPENAI_API_KEY") or os.environ.get("ADENGINE_IMAGE_API_KEY"))
+        ),
     }
 
 
@@ -157,13 +164,21 @@ def launch_run(run_id: str, request: LaunchRequest) -> dict:
     if not destination:
         raise HTTPException(status_code=409, detail="run has no destination URL")
 
+    # Conversion path drives the campaign objective (sales / leads / installs).
+    conversion_path = ConversionPath.purchase
+    if (run_dir / pipeline.BRAND_DNA_FILE).exists():
+        conversion_path = pipeline.load_brand_dna(run_dir).offer.conversion_path
+
     try:
         launcher = meta_launcher.MetaLauncher.from_env()
         plan = meta_launcher.build_plan(
             package,
+            conversion_path,
             daily_budget_cents=int(round(request.daily_budget_usd * 100)),
             destination_url=destination,
             country=request.country.upper(),
+            pixel_id=launcher.pixel_id,
+            app_id=launcher.app_id,
         )
         result = launcher.launch(plan)
     except meta_launcher.MetaConfigError as exc:

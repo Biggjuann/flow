@@ -115,11 +115,14 @@ def test_launch_endpoint(client, monkeypatch, brand_dna, ads):
 
     class FakeLauncher:
         ad_account_id = "act_999"
+        pixel_id = None
+        app_id = None
 
         def launch(self, plan):
             captured["plan"] = plan
             return LaunchResult(
                 campaign_id="cmp_1",
+                objective=plan.campaign.objective.value,
                 adset_ids=["as_1"],
                 ad_ids={aid: f"meta_{aid}" for aid in plan.adsets[0].ad_ids},
             )
@@ -133,6 +136,7 @@ def test_launch_endpoint(client, monkeypatch, brand_dna, ads):
     body = response.json()
     assert body["campaign_id"] == "cmp_1"
     assert body["status"] == "PAUSED"
+    assert body["objective"] == "OUTCOME_TRAFFIC"  # purchase path, no pixel -> traffic
     assert "act=999" in body["ads_manager_url"]
     assert captured["plan"].adsets[0].daily_budget_cents == 5000
     assert captured["plan"].adsets[0].ad_ids == ["ad_01", "ad_02", "ad_03"]

@@ -1,12 +1,15 @@
 # AdEngine
 
-Autonomous Meta campaign builder — Phase 1 (core engine). Give it a business
-website URL; it produces a scored, launch-ready Meta ad campaign package:
+Autonomous Meta campaign builder. Give it a **website URL or an App Store /
+Google Play listing**; it produces a scored, launch-ready Meta ad campaign and
+can push it live (conversion-optimized, all PAUSED until you activate):
 
 ```
-URL → [1. Brand DNA Extractor] → brand_dna.json
+URL / App Store link
+    → [1. Brand DNA Extractor] → brand_dna.json
     → [2. Ad Generator]        → ads.json (12–20 concepts across 9 hook frameworks)
     → [3. Pre-Launch Scorer]   → scored_package.json + report.md
+    → [4. Meta Launcher]       → live campaign (PAUSED), conversion-optimized
 ```
 
 The scorer is an adversarial, *blind* reviewer (it never sees the generator's
@@ -63,7 +66,7 @@ campaign → adset → ads on your Meta ad account via the Marketing API.
 **Safety:** every object is created with `status=PAUSED`. Nothing spends money
 until you review and activate the campaign in Ads Manager.
 
-Required environment variables:
+**Required** (campaign creation):
 
 | Env var | What it is |
 |---|---|
@@ -71,19 +74,48 @@ Required environment variables:
 | `META_AD_ACCOUNT_ID` | your ad account id (`act_...` or just the number) |
 | `META_PAGE_ID` | the Facebook Page the ads are published from |
 
+**Optional** (these are what make it *sell*):
+
+| Env var | Effect |
+|---|---|
+| `META_PIXEL_ID` | Web campaigns optimize for the real money event (Purchase / Lead / Schedule / Contact) instead of clicks — Meta's delivery hunts for buyers. Without it, runs fall back to Traffic. |
+| `META_APP_ID` | App Store / Play runs become install-optimized **App Promotion** campaigns. Without it, app runs drive Traffic to the store page. |
+| `ADENGINE_IMAGE_PROVIDER=openai` + `OPENAI_API_KEY` | Generates a real creative image per ad (from the ad's `image_prompt`) and uploads it to Meta. Without it, ads use the link/store preview image. |
+
 Getting the token: create an app at developers.facebook.com → add the
 Marketing API product → generate a token with `ads_management` +
 `pages_read_engagement` (a System User token from Business Settings is best
 for servers — it doesn't expire).
 
-v1 scope and known limits:
-- Campaign objective is **Traffic** (LINK_CLICKS). Sales/Leads objectives need
-  a pixel / lead form — later phase.
-- Creatives are **link ads**; Meta pulls the preview image from your site's
-  `og:image`. Swap in dedicated creative images in Ads Manager (each ad's
-  `image_prompt` in `ads.json` tells a designer/image model what to make).
+### How it's built to drive sales
+
+- **Objective from intent.** The campaign objective is derived from the brand's
+  conversion path: `purchase → Sales/Purchase`, `lead_form → Leads/Lead`,
+  `booking → Leads/Schedule`, `call → Leads/Contact`, `app_install → App
+  Promotion/Installs`. With a pixel/app id configured, Meta optimizes for that
+  exact event.
+- **Attribution baked in.** Destination links are tagged automatically — UTM
+  params for the web (`utm_source=facebook…&utm_content=<ad_id>`), Apple `ct`
+  campaign token for the App Store — so the client can prove which ad drove
+  each sale/install in their own analytics.
+- **Real creative.** With an image provider set, each ad ships with a generated
+  image; otherwise the preview image is used.
+
+### iOS / mobile apps
+
+Paste an **App Store** (`apps.apple.com`) or **Google Play** link as the URL.
+AdEngine reads the listing as the product, the extractor sets the conversion
+path to `app_install`, ad copy and CTAs (`INSTALL_MOBILE_APP`) are written for
+installs, and the launcher runs an install-optimized App Promotion campaign
+(set `META_APP_ID` to the Facebook app id linked to your iOS app).
+
+### Known limits
+
 - Interest targeting is resolved best-effort by name; unmatched interests are
   skipped.
+- One adset per campaign in v1 (all launch-ready ads share it).
+- True app-install optimization requires the app registered in your Meta
+  Business account and linked to `META_APP_ID`.
 
 ## Deploying to Railway
 
@@ -116,6 +148,10 @@ curl https://<your-app>.up.railway.app/runs/<run_id>/report
 | `META_ACCESS_TOKEN` | — | required for `/launch`; token with `ads_management` |
 | `META_AD_ACCOUNT_ID` | — | required for `/launch`; `act_...` or bare number |
 | `META_PAGE_ID` | — | required for `/launch`; publishing Page id |
+| `META_PIXEL_ID` | — | optional; enables conversion-optimized web campaigns |
+| `META_APP_ID` | — | optional; enables install-optimized app campaigns |
+| `ADENGINE_IMAGE_PROVIDER` | — | `openai` to generate creative images |
+| `OPENAI_API_KEY` | — | image generation key (or `ADENGINE_IMAGE_API_KEY`) |
 | `ADENGINE_PROMPTS_DIR` | `prompts/` | prompt template location |
 
 ## Development

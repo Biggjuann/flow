@@ -26,6 +26,13 @@ PAGE_HINTS: list[tuple[str, tuple[str, ...]]] = [
 
 _STRIP_TAGS = ("script", "style", "noscript", "svg", "iframe", "template", "form")
 
+APP_STORE_HOSTS = ("apps.apple.com", "itunes.apple.com", "play.google.com")
+
+
+def is_app_store_url(url: str) -> bool:
+    host = urlparse(url if "://" in url else f"https://{url}").netloc.lower()
+    return any(h in host for h in APP_STORE_HOSTS)
+
 
 class Page(BaseModel):
     url: str
@@ -122,6 +129,11 @@ def scrape_site(
         home_html = response.text
         domain = urlparse(home_url).netloc.removeprefix("www.")
         pages = [_parse_page(home_url, home_html)]
+
+        # App Store / Play listings are single rich pages — don't chase nav links
+        # (privacy policy, support, etc. add noise without ad-relevant signal).
+        if is_app_store_url(home_url):
+            return ScrapedSite(url=home_url, domain=domain, pages=pages)
 
         links = _internal_links(home_url, home_html)
         for extra_url in _pick_pages(home_url, links, max_pages - 1):

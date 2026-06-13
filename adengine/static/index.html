@@ -165,6 +165,7 @@ let openId = null;
 let activeTab = "ads";
 let detailCache = {};   // run_id -> {package, dna, report}
 let pollTimer = null;
+let health = {};        // server config flags from /healthz
 
 async function api(path, options) {
   const res = await fetch(path, options);
@@ -320,22 +321,34 @@ async function renderDetail(run) {
     else pane = `<pre class="raw">${esc(JSON.stringify(dna, null, 2))}</pre>`;
     let launchPanel = "";
     if (artifacts.launch) {
-      const ids = Object.entries(artifacts.launch.ad_ids || {}).map(([k, v]) => `${k}→${v}`).join(", ");
+      const L = artifacts.launch;
+      const ids = Object.entries(L.ad_ids || {}).map(([k, v]) => `${k}→${v}`).join(", ");
+      const notes = (L.notes || []).map(n => `<li>${esc(n)}</li>`).join("");
       launchPanel = `
         <div class="launch-done">
-          ✅ Pushed to Meta — campaign <b>${esc(artifacts.launch.campaign_id)}</b>, ${Object.keys(artifacts.launch.ad_ids || {}).length} ads, status <b>PAUSED</b>.
-          <a href="${esc(artifacts.launch.ads_manager_url || "https://adsmanager.facebook.com")}" target="_blank">Review &amp; activate in Ads Manager →</a>
+          ✅ Pushed to Meta — campaign <b>${esc(L.campaign_id)}</b>
+          · objective <b>${esc((L.objective || "").replace("OUTCOME_", ""))}</b>
+          · ${Object.keys(L.ad_ids || {}).length} ads
+          ${L.images_generated ? `· ${L.images_generated} AI images` : ""}
+          · status <b>PAUSED</b>.
+          <a href="${esc(L.ads_manager_url || "https://adsmanager.facebook.com")}" target="_blank">Review &amp; activate in Ads Manager →</a>
           <div class="ids">${esc(ids)}</div>
+          ${notes ? `<ul class="ids">${notes}</ul>` : ""}
         </div>`;
     } else if (pkg.launch_ready_count > 0) {
+      const opt = [];
+      if (health.pixel_configured) opt.push("conversion-optimized");
+      if (health.app_id_configured) opt.push("app-install ready");
+      if (health.images_configured) opt.push("AI creative images");
+      const optNote = opt.length ? ` Active: <b>${opt.join(", ")}</b>.` : "";
       launchPanel = `
         <div class="launch-meta">
           <label>Daily budget $</label>
           <input type="number" id="budget" value="20" min="1" step="1">
           <label>Country</label>
           <input type="text" id="country" value="US" maxlength="2" style="width:54px">
-          <button id="push-meta">Push ${pkg.launch_ready_count} ads to Meta</button>
-          <span class="note">Creates the campaign, adset, and ads <b>PAUSED</b> — nothing spends until you activate it in Ads Manager. Requires META_ACCESS_TOKEN / META_AD_ACCOUNT_ID / META_PAGE_ID on the server.</span>
+          <button id="push-meta" ${health.meta_configured ? "" : "disabled title='Set META_* server variables to enable'"}>Push ${pkg.launch_ready_count} ads to Meta</button>
+          <span class="note">Creates the campaign, adset, and ads <b>PAUSED</b> — nothing spends until you activate it in Ads Manager. Objective is chosen from the brand's conversion path; destination links are tagged for attribution.${optNote}${health.meta_configured ? "" : " <b>Meta not configured</b> — set META_ACCESS_TOKEN / META_AD_ACCOUNT_ID / META_PAGE_ID."}</span>
           <span class="err2" id="launch-error"></span>
         </div>`;
     }
@@ -381,6 +394,7 @@ async function renderDetail(run) {
   });
 }
 
+api("/healthz").then(h => { health = h; }).catch(() => {});
 refresh();
 </script>
 </body>
