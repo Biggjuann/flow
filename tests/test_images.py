@@ -42,3 +42,70 @@ def test_provider_from_env(monkeypatch):
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-1")
     assert isinstance(provider_from_env(), OpenAIImageProvider)
+
+
+# ----------------------------------------------------- preview generation
+
+def _png() -> bytes:
+    return b"\x89PNG\r\n\x1a\n-fake-png-bytes"
+
+
+def test_provider_surfaces_verification_error():
+    def handler(request):
+        return httpx.Response(403, json={"error": {"message": "Your organization must be verified"}})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.openai.test/v1")
+    provider = OpenAIImageProvider("sk", client=client)
+    assert provider("x") is None
+    assert "verified" in provider.last_error
+    assert "dall-e-3" in provider.last_error  # actionable hint
+
+
+def test_generate_previews_writes_files_and_manifest(tmp_path, ads):
+    from adengine.images import generate_previews
+
+    calls = []
+
+    def provider(prompt):
+        calls.append(prompt)
+        return _png()
+
+    manifest = generate_previews(tmp_path, ads[:3], provider)
+    assert manifest["generated"] == 3 and manifest["failed"] == 0
+    for ad in ads[:3]:
+        assert (tmp_path / f"{ad.id}.png").exists()
+        assert manifest["ads"][ad.id]["ok"]
+    assert len(calls) == 3
+
+
+def test_generate_previews_caches_unless_force(tmp_path, ads):
+    from adengine.images import generate_previews
+
+    n = [0]
+
+    def provider(prompt):
+        n[0] += 1
+        return _png()
+
+    generate_previews(tmp_path, ads[:2], provider)
+    manifest = generate_previews(tmp_path, ads[:2], provider)  # cached
+    assert n[0] == 2
+    assert all(v["cached"] for v in manifest["ads"].values())
+    generate_previews(tmp_path, ads[:2], provider, force=True)  # regen
+    assert n[0] == 4
+
+
+def test_generate_previews_records_failure(tmp_path, ads):
+    from adengine.images import generate_previews
+
+    class Failing:
+        model = "gpt-image-1"
+        last_error = "boom: org not verified"
+
+        def __call__(self, prompt):
+            return None
+
+    manifest = generate_previews(tmp_path, ads[:2], Failing())
+    assert manifest["generated"] == 0 and manifest["failed"] == 2
+    for entry in manifest["ads"].values():
+        assert entry["ok"] is False and "org not verified" in entry["error"]

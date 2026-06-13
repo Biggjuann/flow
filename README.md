@@ -81,7 +81,33 @@ until you review and activate the campaign in Ads Manager.
 |---|---|
 | `META_PIXEL_ID` | Web campaigns optimize for the real money event (Purchase / Lead / Schedule / Contact) instead of clicks — Meta's delivery hunts for buyers. Without it, runs fall back to Traffic. |
 | `META_APP_ID` | App Store / Play runs become install-optimized **App Promotion** campaigns. Without it, app runs drive Traffic to the store page. |
-| `ADENGINE_IMAGE_PROVIDER=openai` + `OPENAI_API_KEY` | Generates a real creative image per ad (from the ad's `image_prompt`) and uploads it to Meta. Without it, ads use the link/store preview image. |
+| `ADENGINE_IMAGE_PROVIDER=openai` + `OPENAI_API_KEY` | Lets you generate a real creative image per ad (from the ad's `image_prompt`), **review it in the web app**, and ship it to Meta at launch. Without it, ads use the link/store preview image. |
+
+### Reviewing AI creative images before launch
+
+Creative is ~70% of Meta performance, so you review it *before* spending:
+
+1. Set `ADENGINE_IMAGE_PROVIDER=openai` and `OPENAI_API_KEY` (two separate
+   server variables — both required). Confirm on `/healthz` → `images_configured: true`.
+2. Open a finished run in the web app → the **Ads** tab shows a **Generate
+   creative images** button. Click it; ~30–60s later each launch-ready ad card
+   shows its real generated image.
+3. Don't like one? **Regenerate** re-rolls all of them. The images you see are
+   exactly what ships — at launch the reviewed previews are reused (no
+   regeneration, no double cost), uploaded to Meta, and attached to each ad.
+
+If generation fails, the card shows **why** (e.g. *"gpt-image-1 requires a
+verified OpenAI organization"* or *"no quota — add billing"*) instead of
+silently doing nothing. Common fixes:
+
+- **`gpt-image-1` needs org verification.** Either verify at
+  platform.openai.com/settings/organization/general, or set
+  `ADENGINE_IMAGE_MODEL=dall-e-3` (no verification required).
+- **401** → wrong/inactive `OPENAI_API_KEY`. **429 / quota** → add OpenAI
+  billing (image generation is billed by OpenAI, separate from Anthropic).
+
+It never blocks a launch: any ad whose image fails just falls back to the
+link-preview image.
 
 Getting the token: create an app at developers.facebook.com → add the
 Marketing API product → generate a token with `ads_management` +
@@ -190,7 +216,9 @@ curl https://<your-app>.up.railway.app/runs/<run_id>/report
 | `META_PAGE_ID` | — | required for `/launch`; publishing Page id |
 | `META_PIXEL_ID` | — | optional; enables conversion-optimized web campaigns |
 | `META_APP_ID` | — | optional; enables install-optimized app campaigns |
-| `ADENGINE_IMAGE_PROVIDER` | — | `openai` to generate creative images |
+| `ADENGINE_IMAGE_PROVIDER` | — | `openai` to enable AI creative images |
+| `OPENAI_API_KEY` | — | OpenAI key for image generation (or `ADENGINE_IMAGE_API_KEY`) |
+| `ADENGINE_IMAGE_MODEL` | `gpt-image-1` | image model; set `dall-e-3` to skip org verification |
 | `OPENAI_API_KEY` | — | image generation key (or `ADENGINE_IMAGE_API_KEY`) |
 | `ADENGINE_PROMPTS_DIR` | `prompts/` | prompt template location |
 

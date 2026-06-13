@@ -22,6 +22,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
+from adengine import images as image_mod
 from adengine import launcher as meta_launcher
 from adengine import optimizer as optimizer_mod
 from adengine import pipeline
@@ -32,6 +33,9 @@ _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 LAUNCH_FILE = "launch_result.json"
 OPTIMIZE_LOG_FILE = "optimization_log.json"
+IMAGES_DIR = "images"
+IMAGES_MANIFEST = "images_manifest.json"
+_AD_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 ARTIFACTS = {
     "brand_dna": pipeline.BRAND_DNA_FILE,
@@ -39,6 +43,7 @@ ARTIFACTS = {
     "scored_package": pipeline.SCORED_FILE,
     "launch_result": LAUNCH_FILE,
     "optimization_log": OPTIMIZE_LOG_FILE,
+    "images_manifest": IMAGES_MANIFEST,
 }
 
 app = FastAPI(title="AdEngine", version="0.1.0")
@@ -195,6 +200,55 @@ def get_artifact(run_id: str, name: str) -> JSONResponse:
     return JSONResponse(content=json.loads(path.read_text()))
 
 
+class ImagesRequest(BaseModel):
+    force: bool = Field(default=False, description="Regenerate even if a preview exists")
+    launch_ready_only: bool = Field(
+        default=True, description="Only generate for ads that passed the launch gate"
+    )
+
+
+@app.post("/runs/{run_id}/images")
+def generate_images(run_id: str, request: ImagesRequest) -> dict:
+    """Generate preview creative images per ad so they can be reviewed in the UI."""
+    run_dir = _run_dir_for(run_id)
+    if not (run_dir / pipeline.SCORED_FILE).exists():
+        raise HTTPException(status_code=409, detail="run has no scored package yet")
+
+    provider = image_mod.provider_from_env()
+    if provider is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Image generation is not configured — set ADENGINE_IMAGE_PROVIDER=openai "
+            "and OPENAI_API_KEY in the server environment.",
+        )
+
+    package = pipeline.load_scored_package(run_dir)
+    ads = [
+        s.ad
+        for s in package.scored_ads
+        if not request.launch_ready_only or s.verdict.value == "launch_ready"
+    ]
+    if not ads:
+        raise HTTPException(status_code=409, detail="no launch-ready ads to generate images for")
+
+    manifest = image_mod.generate_previews(
+        run_dir / IMAGES_DIR, ads, provider, force=request.force
+    )
+    (run_dir / IMAGES_MANIFEST).write_text(json.dumps(manifest, indent=2))
+    return manifest
+
+
+@app.get("/runs/{run_id}/images/{ad_id}")
+def get_image(run_id: str, ad_id: str):
+    run_dir = _run_dir_for(run_id)
+    if not _AD_ID_RE.match(ad_id):
+        raise HTTPException(status_code=400, detail="invalid ad id")
+    path = run_dir / IMAGES_DIR / f"{ad_id}.png"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="no generated image for this ad")
+    return FileResponse(path, media_type="image/png")
+
+
 class LaunchRequest(BaseModel):
     daily_budget_usd: float = Field(default=20.0, ge=1, le=10_000)
     country: str = Field(default="US", min_length=2, max_length=2)
@@ -223,6 +277,8 @@ def launch_run(run_id: str, request: LaunchRequest) -> dict:
 
     try:
         launcher = meta_launcher.MetaLauncher.from_env()
+        # Reuse the previews the user reviewed in the UI; generate any missing on the fly.
+        launcher.image_dir = run_dir / IMAGES_DIR
         plan = meta_launcher.build_plan(
             package,
             conversion_path,

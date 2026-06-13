@@ -24,6 +24,7 @@ import enum
 import json
 import os
 import re
+from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
@@ -341,6 +342,7 @@ class MetaLauncher:
         api_version: str = DEFAULT_API_VERSION,
         client: httpx.Client | None = None,
         image_provider: ImageProvider | None = None,
+        image_dir: Path | None = None,
     ) -> None:
         self.access_token = access_token
         self.ad_account_id = (
@@ -348,6 +350,7 @@ class MetaLauncher:
         )
         self.page_id = page_id
         self.image_provider = image_provider
+        self.image_dir = image_dir  # pre-generated previews to reuse at launch
         self.pixel_id = os.environ.get("META_PIXEL_ID") or None
         self.app_id = os.environ.get("META_APP_ID") or None
         self._client = client or httpx.Client(
@@ -569,10 +572,8 @@ class MetaLauncher:
         return result
 
     def _maybe_image(self, creative: AdCreativeSpec, result: LaunchResult) -> str | None:
-        if not self.image_provider or not creative.image_prompt:
-            return None
         try:
-            data = self.image_provider(creative.image_prompt)
+            data = self._image_bytes(creative)
             if not data:
                 return None
             image_hash = self.upload_image(data, creative.ad_concept_id or "adengine")
@@ -581,3 +582,13 @@ class MetaLauncher:
             return image_hash
         except Exception:
             return None  # creative falls back to link preview; never blocks a launch
+
+    def _image_bytes(self, creative: AdCreativeSpec) -> bytes | None:
+        """Prefer a reviewed preview from image_dir; else generate on the fly."""
+        if self.image_dir is not None and creative.ad_concept_id:
+            preview = self.image_dir / f"{creative.ad_concept_id}.png"
+            if preview.exists():
+                return preview.read_bytes()
+        if self.image_provider and creative.image_prompt:
+            return self.image_provider(creative.image_prompt)
+        return None

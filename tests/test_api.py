@@ -284,3 +284,84 @@ def test_list_runs_ignores_non_run_dirs(client):
     runs = client.get("/runs").json()
     assert [r["run_id"] for r in runs] == [run_id]
     assert all(r["state"] != "unknown" for r in runs)
+
+
+# ------------------------------------------------------------ image previews
+
+def test_images_endpoint_generates_and_serves(client, monkeypatch, brand_dna, ads):
+    from adengine import api as api_module
+
+    run_id = client.post("/runs", json={"url": "acmecoffee.example"}).json()["run_id"]
+    run_dir = api_module.RUNS_BASE / run_id
+    (run_dir / pipeline.SCORED_FILE).write_text(
+        make_scored_package(brand_dna, ads).model_dump_json()
+    )
+
+    png = b"\x89PNG\r\n\x1a\n-fake"
+
+    class FakeProvider:
+        model = "gpt-image-1"
+        last_error = None
+
+        def __call__(self, prompt):
+            return png
+
+    monkeypatch.setattr(api_module.image_mod, "provider_from_env", lambda *a, **k: FakeProvider())
+
+    manifest = client.post(f"/runs/{run_id}/images", json={}).json()
+    assert manifest["generated"] == 3  # only launch-ready ads
+    assert manifest["model"] == "gpt-image-1"
+
+    # manifest exposed as artifact + image served as PNG
+    assert "images_manifest" in client.get(f"/runs/{run_id}").json()["artifacts"]
+    img = client.get(f"/runs/{run_id}/images/ad_01")
+    assert img.status_code == 200
+    assert img.headers["content-type"] == "image/png"
+    assert img.content == png
+
+    # a blocked / non-generated ad has no image
+    assert client.get(f"/runs/{run_id}/images/ad_99").status_code == 404
+    assert client.get(f"/runs/{run_id}/images/..%2f..%2fetc").status_code in (400, 404)
+
+
+def test_images_endpoint_unconfigured_400(client, monkeypatch, brand_dna, ads):
+    from adengine import api as api_module
+
+    run_id = client.post("/runs", json={"url": "x.example"}).json()["run_id"]
+    run_dir = api_module.RUNS_BASE / run_id
+    (run_dir / pipeline.SCORED_FILE).write_text(
+        make_scored_package(brand_dna, ads).model_dump_json()
+    )
+    monkeypatch.setattr(api_module.image_mod, "provider_from_env", lambda *a, **k: None)
+    response = client.post(f"/runs/{run_id}/images", json={})
+    assert response.status_code == 400
+    assert "ADENGINE_IMAGE_PROVIDER" in response.json()["detail"]
+
+
+def test_launch_reuses_reviewed_images(client, monkeypatch, brand_dna, ads):
+    from adengine import api as api_module
+    from adengine.launcher import LaunchResult
+
+    run_id = client.post("/runs", json={"url": "acmecoffee.example"}).json()["run_id"]
+    run_dir = api_module.RUNS_BASE / run_id
+    (run_dir / pipeline.SCORED_FILE).write_text(
+        make_scored_package(brand_dna, ads).model_dump_json()
+    )
+
+    seen = {}
+
+    class FakeLauncher:
+        ad_account_id = "act_1"
+        pixel_id = None
+        app_id = None
+        image_dir = None
+
+        def launch(self, plan):
+            seen["image_dir"] = self.image_dir
+            return LaunchResult(campaign_id="cmp", objective=plan.campaign.objective.value)
+
+    monkeypatch.setattr(
+        api_module.meta_launcher.MetaLauncher, "from_env", classmethod(lambda cls: FakeLauncher())
+    )
+    client.post(f"/runs/{run_id}/launch", json={})
+    assert seen["image_dir"] == run_dir / api_module.IMAGES_DIR
