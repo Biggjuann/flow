@@ -365,3 +365,87 @@ def test_launch_reuses_reviewed_images(client, monkeypatch, brand_dna, ads):
     )
     client.post(f"/runs/{run_id}/launch", json={})
     assert seen["image_dir"] == run_dir / api_module.IMAGES_DIR
+
+
+# ------------------------------------------------------------ image uploads
+
+def _scored(client, brand_dna, ads):
+    from adengine import api as api_module
+    run_id = client.post("/runs", json={"url": "acmecoffee.example"}).json()["run_id"]
+    run_dir = api_module.RUNS_BASE / run_id
+    (run_dir / pipeline.SCORED_FILE).write_text(
+        make_scored_package(brand_dna, ads).model_dump_json()
+    )
+    return run_id, run_dir
+
+
+def test_upload_then_serve_and_lock(client, monkeypatch, brand_dna, ads):
+    from adengine import api as api_module
+
+    run_id, run_dir = _scored(client, brand_dna, ads)
+    png = b"\x89PNG\r\n\x1a\nMYLOGO"
+
+    # upload a user image for ad_01
+    res = client.post(
+        f"/runs/{run_id}/images/ad_01/upload",
+        files={"file": ("logo.png", png, "image/png")},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["source"] == "upload"
+
+    # served back with correct content type
+    got = client.get(f"/runs/{run_id}/images/ad_01")
+    assert got.status_code == 200
+    assert got.content == png
+    assert got.headers["content-type"] == "image/png"
+
+    # manifest marks it as an upload + exposed as artifact
+    manifest = client.get(f"/runs/{run_id}/artifacts/images_manifest").json()
+    assert manifest["ads"]["ad_01"]["source"] == "upload"
+
+    # regeneration must NOT overwrite the upload
+    class FakeProvider:
+        model = "gpt-image-1"
+        last_error = None
+        def __call__(self, prompt):
+            return b"\x89PNG\r\n\x1a\nAIGEN"
+
+    monkeypatch.setattr(api_module.image_mod, "provider_from_env", lambda *a, **k: FakeProvider())
+    client.post(f"/runs/{run_id}/images", json={"force": True})
+    assert client.get(f"/runs/{run_id}/images/ad_01").content == png  # still the upload
+
+
+def test_upload_rejects_non_image(client, brand_dna, ads):
+    run_id, _ = _scored(client, brand_dna, ads)
+    res = client.post(
+        f"/runs/{run_id}/images/ad_01/upload",
+        files={"file": ("x.txt", b"hello not an image", "text/plain")},
+    )
+    assert res.status_code == 400
+    assert "PNG" in res.json()["detail"]
+
+
+def test_upload_works_without_ai_provider(client, monkeypatch, brand_dna, ads):
+    # uploading your own creative must not require ADENGINE_IMAGE_PROVIDER
+    from adengine import api as api_module
+    monkeypatch.setattr(api_module.image_mod, "provider_from_env", lambda *a, **k: None)
+    run_id, _ = _scored(client, brand_dna, ads)
+    res = client.post(
+        f"/runs/{run_id}/images/ad_02/upload",
+        files={"file": ("a.jpg", b"\xff\xd8\xff\xe0JFIF-bytes", "image/jpeg")},
+    )
+    assert res.status_code == 200
+    assert client.get(f"/runs/{run_id}/images/ad_02").headers["content-type"] == "image/jpeg"
+
+
+def test_delete_image_reverts(client, brand_dna, ads):
+    run_id, _ = _scored(client, brand_dna, ads)
+    client.post(
+        f"/runs/{run_id}/images/ad_01/upload",
+        files={"file": ("l.png", b"\x89PNG\r\n\x1a\nX", "image/png")},
+    )
+    assert client.get(f"/runs/{run_id}/images/ad_01").status_code == 200
+    client.delete(f"/runs/{run_id}/images/ad_01")
+    assert client.get(f"/runs/{run_id}/images/ad_01").status_code == 404
+    manifest = client.get(f"/runs/{run_id}/artifacts/images_manifest").json()
+    assert "ad_01" not in (manifest.get("ads") or {})

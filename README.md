@@ -96,7 +96,21 @@ Creative is ~70% of Meta performance, so you review it *before* spending:
    exactly what ships — at launch the reviewed previews are reused (no
    regeneration, no double cost), uploaded to Meta, and attached to each ad.
 
-If generation fails, the card shows **why** (e.g. *"gpt-image-1 requires a
+### Upload your own creative (no AI needed)
+
+Every ad card has an **Upload image** button — use it to put your own creative
+(a real product photo, a real app screenshot, a brand asset, a designer's file)
+on any ad. PNG / JPEG / GIF, up to 8 MB.
+
+- Uploads work **with or without** `ADENGINE_IMAGE_PROVIDER` configured — you
+  don't need OpenAI to use your own images.
+- An uploaded image is tagged **"your upload"** and is **never overwritten** by
+  Generate / Regenerate, so you can mix AI images and your own across ads.
+- **Remove** clears an ad's image and reverts it to the link-preview image.
+- Image priority at launch: **your upload → AI-generated preview → link
+  preview**. Whatever shows on the card is exactly what ships to Meta.
+
+If AI generation fails, the card shows **why** (e.g. *"gpt-image-1 requires a
 verified OpenAI organization"* or *"no quota — add billing"*) instead of
 silently doing nothing. Common fixes:
 

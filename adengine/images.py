@@ -132,19 +132,47 @@ def image_path(images_dir: Path, ad_id: str) -> Path:
     return images_dir / f"{ad_id}.png"
 
 
+# Magic-byte signatures for the formats Meta accepts as ad images.
+def sniff_image_type(data: bytes) -> str | None:
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return None
+
+
+def save_upload(images_dir: Path, ad_id: str, data: bytes) -> str:
+    """Persist a user-uploaded creative image. Returns its content type.
+
+    Raises ValueError if the bytes aren't a supported image format. Stored at
+    the same path the launcher reads, so uploads ship to Meta automatically.
+    """
+    content_type = sniff_image_type(data)
+    if content_type is None:
+        raise ValueError("unsupported image format — upload a PNG, JPEG, or GIF")
+    images_dir.mkdir(parents=True, exist_ok=True)
+    image_path(images_dir, ad_id).write_bytes(data)
+    return content_type
+
+
 def generate_previews(
     images_dir: Path,
     ads: list,
     provider: ImageProvider,
     force: bool = False,
+    locked: set[str] | None = None,
 ) -> dict:
     """Generate a preview image per ad into ``images_dir``.
 
     ``ads`` is a list of objects with ``.id`` and ``.creative_direction.image_prompt``
-    (AdConcept). Returns a manifest dict: per-ad ok/error plus totals. Already-
-    generated images are reused unless ``force``.
+    (AdConcept). Returns a manifest dict: per-ad ok/error/source plus totals.
+    Already-generated images are reused unless ``force``. Ads in ``locked``
+    (user uploads) are never regenerated, even with ``force``.
     """
     images_dir.mkdir(parents=True, exist_ok=True)
+    locked = locked or set()
     items: dict[str, dict] = {}
     generated = 0
     for ad in ads:
@@ -152,22 +180,26 @@ def generate_previews(
         prompt = ad.creative_direction.image_prompt
         path = image_path(images_dir, ad_id)
 
+        if ad_id in locked and path.exists():
+            items[ad_id] = {"ok": True, "source": "upload", "cached": True, "error": None}
+            generated += 1
+            continue
         if path.exists() and not force:
-            items[ad_id] = {"ok": True, "cached": True, "error": None}
+            items[ad_id] = {"ok": True, "source": "generated", "cached": True, "error": None}
             generated += 1
             continue
         if not prompt:
-            items[ad_id] = {"ok": False, "error": "ad has no image_prompt"}
+            items[ad_id] = {"ok": False, "source": "generated", "error": "ad has no image_prompt"}
             continue
 
         data = provider(prompt)
         if data:
             path.write_bytes(data)
-            items[ad_id] = {"ok": True, "cached": False, "error": None}
+            items[ad_id] = {"ok": True, "source": "generated", "cached": False, "error": None}
             generated += 1
         else:
             error = getattr(provider, "last_error", None) or "image generation failed"
-            items[ad_id] = {"ok": False, "error": error}
+            items[ad_id] = {"ok": False, "source": "generated", "error": error}
 
     return {
         "total": len(ads),

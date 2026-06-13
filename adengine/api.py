@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
@@ -35,6 +35,7 @@ LAUNCH_FILE = "launch_result.json"
 OPTIMIZE_LOG_FILE = "optimization_log.json"
 IMAGES_DIR = "images"
 IMAGES_MANIFEST = "images_manifest.json"
+MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 _AD_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 ARTIFACTS = {
@@ -207,6 +208,20 @@ class ImagesRequest(BaseModel):
     )
 
 
+def _read_manifest(run_dir: Path) -> dict:
+    path = run_dir / IMAGES_MANIFEST
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def _uploaded_ad_ids(run_dir: Path) -> set[str]:
+    manifest = _read_manifest(run_dir)
+    return {
+        ad_id
+        for ad_id, entry in (manifest.get("ads") or {}).items()
+        if entry.get("source") == "upload"
+    }
+
+
 @app.post("/runs/{run_id}/images")
 def generate_images(run_id: str, request: ImagesRequest) -> dict:
     """Generate preview creative images per ad so they can be reviewed in the UI."""
@@ -231,11 +246,55 @@ def generate_images(run_id: str, request: ImagesRequest) -> dict:
     if not ads:
         raise HTTPException(status_code=409, detail="no launch-ready ads to generate images for")
 
+    # User uploads are never overwritten by (re)generation.
     manifest = image_mod.generate_previews(
-        run_dir / IMAGES_DIR, ads, provider, force=request.force
+        run_dir / IMAGES_DIR,
+        ads,
+        provider,
+        force=request.force,
+        locked=_uploaded_ad_ids(run_dir),
     )
     (run_dir / IMAGES_MANIFEST).write_text(json.dumps(manifest, indent=2))
     return manifest
+
+
+@app.post("/runs/{run_id}/images/{ad_id}/upload")
+async def upload_image(run_id: str, ad_id: str, file: UploadFile = File(...)) -> dict:
+    """Upload your own creative image for one ad (overrides AI/preview at launch)."""
+    run_dir = _run_dir_for(run_id)
+    if not _AD_ID_RE.match(ad_id):
+        raise HTTPException(status_code=400, detail="invalid ad id")
+
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="image too large (max 8 MB)")
+    try:
+        image_mod.save_upload(run_dir / IMAGES_DIR, ad_id, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    # Record it in the manifest so the UI and (re)generation know it's user-owned.
+    manifest = _read_manifest(run_dir)
+    manifest.setdefault("ads", {})[ad_id] = {"ok": True, "source": "upload", "error": None}
+    manifest["generated"] = sum(1 for e in manifest["ads"].values() if e.get("ok"))
+    (run_dir / IMAGES_MANIFEST).write_text(json.dumps(manifest, indent=2))
+    return {"ad_id": ad_id, "source": "upload", "ok": True}
+
+
+@app.delete("/runs/{run_id}/images/{ad_id}")
+def delete_image(run_id: str, ad_id: str) -> dict:
+    """Remove an ad's image (reverts to the link-preview image at launch)."""
+    run_dir = _run_dir_for(run_id)
+    if not _AD_ID_RE.match(ad_id):
+        raise HTTPException(status_code=400, detail="invalid ad id")
+    path = run_dir / IMAGES_DIR / f"{ad_id}.png"
+    if path.exists():
+        path.unlink()
+    manifest = _read_manifest(run_dir)
+    if (manifest.get("ads") or {}).pop(ad_id, None) is not None:
+        manifest["generated"] = sum(1 for e in manifest["ads"].values() if e.get("ok"))
+        (run_dir / IMAGES_MANIFEST).write_text(json.dumps(manifest, indent=2))
+    return {"ad_id": ad_id, "removed": True}
 
 
 @app.get("/runs/{run_id}/images/{ad_id}")
@@ -245,8 +304,9 @@ def get_image(run_id: str, ad_id: str):
         raise HTTPException(status_code=400, detail="invalid ad id")
     path = run_dir / IMAGES_DIR / f"{ad_id}.png"
     if not path.exists():
-        raise HTTPException(status_code=404, detail="no generated image for this ad")
-    return FileResponse(path, media_type="image/png")
+        raise HTTPException(status_code=404, detail="no image for this ad")
+    media_type = image_mod.sniff_image_type(path.read_bytes()[:8]) or "image/png"
+    return FileResponse(path, media_type=media_type)
 
 
 class LaunchRequest(BaseModel):

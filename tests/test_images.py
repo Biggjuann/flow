@@ -109,3 +109,46 @@ def test_generate_previews_records_failure(tmp_path, ads):
     assert manifest["generated"] == 0 and manifest["failed"] == 2
     for entry in manifest["ads"].values():
         assert entry["ok"] is False and "org not verified" in entry["error"]
+
+
+# ----------------------------------------------------- upload helpers
+
+def test_sniff_image_type():
+    from adengine.images import sniff_image_type
+    assert sniff_image_type(b"\x89PNG\r\n\x1a\n....") == "image/png"
+    assert sniff_image_type(b"\xff\xd8\xff\xe0....") == "image/jpeg"
+    assert sniff_image_type(b"GIF89a...") == "image/gif"
+    assert sniff_image_type(b"not an image") is None
+
+
+def test_save_upload_writes_and_rejects(tmp_path):
+    from adengine.images import save_upload
+
+    png = b"\x89PNG\r\n\x1a\n-bytes"
+    assert save_upload(tmp_path, "ad_01", png) == "image/png"
+    assert (tmp_path / "ad_01.png").read_bytes() == png
+
+    import pytest
+    with pytest.raises(ValueError):
+        save_upload(tmp_path, "ad_02", b"<html>not an image</html>")
+
+
+def test_locked_uploads_survive_regeneration(tmp_path, ads):
+    from adengine.images import generate_previews, save_upload
+
+    # ad_01 is a user upload; ad_02 is AI-generated
+    save_upload(tmp_path, ads[0].id, b"\x89PNG\r\n\x1a\nUPLOAD")
+    calls = []
+
+    def provider(prompt):
+        calls.append(prompt)
+        return b"\x89PNG\r\n\x1a\nAI"
+
+    manifest = generate_previews(
+        tmp_path, ads[:2], provider, force=True, locked={ads[0].id}
+    )
+    # locked ad never regenerated, upload bytes intact
+    assert (tmp_path / f"{ads[0].id}.png").read_bytes() == b"\x89PNG\r\n\x1a\nUPLOAD"
+    assert manifest["ads"][ads[0].id]["source"] == "upload"
+    assert manifest["ads"][ads[1].id]["source"] == "generated"
+    assert len(calls) == 1  # only ad_02 hit the provider

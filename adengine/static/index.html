@@ -104,7 +104,15 @@
   .card .score { margin-left: auto; font-family: var(--mono); font-size: 13px; color: var(--accent); }
   .card .hook { font-size: 15px; font-weight: 650; line-height: 1.4; }
   .card .body { color: var(--muted); font-size: 13px; white-space: pre-wrap; }
-  .ad-img { width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); }
+  .ad-img-wrap { position: relative; }
+  .ad-img { width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); display: block; }
+  .img-tag { position: absolute; top: 8px; left: 8px; background: rgba(20,24,29,.85); color: var(--accent); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; padding: 3px 7px; border-radius: 99px; }
+  .ad-img-actions { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+  .upload-btn { color: var(--accent); cursor: pointer; font-weight: 600; }
+  .upload-btn:hover { text-decoration: underline; }
+  .link-btn { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0; }
+  .link-btn:hover { color: var(--red); text-decoration: underline; }
+  .up-err { color: var(--red); flex: 1; }
   .ad-img-prompt { font-size: 12px; color: var(--muted); background: var(--panel-2); border: 1px dashed var(--line); border-radius: 8px; padding: 10px; line-height: 1.4; }
   .ad-img-err { font-size: 12px; color: var(--red); background: #2a1a17; border: 1px solid #4a2820; border-radius: 8px; padding: 10px; }
   .img-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; margin-bottom: 14px; }
@@ -272,14 +280,24 @@ function adCard(scored, runId, images) {
   const fixes = scored.verdict === "blocked" && review.fix_suggestions.length
     ? `<ul class="fixes">${review.fix_suggestions.map(f => `<li>${esc(f)}</li>`).join("")}</ul>` : "";
   const img = images && images.ads ? images.ads[ad.id] : null;
+  const cb = (img && img._cachebust) || "";
   let creative = "";
   if (img && img.ok) {
-    creative = `<img class="ad-img" src="/runs/${esc(runId)}/images/${esc(ad.id)}?t=${img._cachebust || ""}" alt="generated creative">`;
+    const tag = img.source === "upload" ? `<span class="img-tag">your upload</span>` : "";
+    creative = `<div class="ad-img-wrap"><img class="ad-img" src="/runs/${esc(runId)}/images/${esc(ad.id)}?t=${cb}" alt="creative">${tag}</div>`;
   } else if (img && img.error) {
     creative = `<div class="ad-img-err">⚠ image failed: ${esc(img.error)}</div>`;
   } else {
     creative = `<div class="ad-img-prompt">🖼 ${esc(ad.creative_direction.image_prompt)}</div>`;
   }
+  const imgActions = `
+    <div class="ad-img-actions">
+      <label class="upload-btn">Upload image
+        <input type="file" accept="image/png,image/jpeg,image/gif" data-upload="${esc(ad.id)}" hidden>
+      </label>
+      ${img && img.ok ? `<button class="link-btn" data-remove="${esc(ad.id)}">Remove</button>` : ""}
+      <span class="up-err" data-uperr="${esc(ad.id)}"></span>
+    </div>`;
   return `
     <div class="card">
       <div class="top">
@@ -288,6 +306,7 @@ function adCard(scored, runId, images) {
         <span class="score">${scored.composite.toFixed(2)} · policy ${review.policy_risk}/10</span>
       </div>
       ${creative}
+      ${imgActions}
       <div class="hook">${esc(ad.hook)}</div>
       <div class="body">${esc(ad.primary_text)}</div>
       <div class="meta"><b>${esc(ad.headline)}</b> — ${esc(ad.description)} · <b>${esc(ad.cta_button)}</b><br>
@@ -439,6 +458,47 @@ async function renderDetail(run) {
       genBtn.textContent = "Generate creative images";
     }
   });
+
+  const refreshImages = async (manifest) => {
+    const stamp = Date.now();
+    if (manifest && manifest.ads) for (const k in manifest.ads) manifest.ads[k]._cachebust = stamp;
+    delete detailCache[run.run_id];
+    const fresh = await loadArtifacts(run);
+    if (manifest) fresh.images = { ...(fresh.images || {}), ...manifest, ads: { ...((fresh.images || {}).ads || {}), ...(manifest.ads || {}) } };
+    if (fresh.images && fresh.images.ads) for (const k in fresh.images.ads) fresh.images.ads[k]._cachebust = stamp;
+    detailCache[run.run_id] = fresh;
+    activeTab = "ads";
+    renderDetail(run);
+  };
+
+  detail.querySelectorAll("input[data-upload]").forEach(input =>
+    input.addEventListener("change", async () => {
+      const adId = input.dataset.upload;
+      const errEl = detail.querySelector(`[data-uperr="${adId}"]`);
+      if (errEl) errEl.textContent = "";
+      const file = input.files[0];
+      if (!file) return;
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        const res = await fetch(`/runs/${run.run_id}/images/${adId}/upload`, { method: "POST", body: form });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+        await refreshImages(null);
+      } catch (e) {
+        if (errEl) errEl.textContent = e.message;
+      }
+    }));
+
+  detail.querySelectorAll("[data-remove]").forEach(btn =>
+    btn.addEventListener("click", async () => {
+      try {
+        await api(`/runs/${run.run_id}/images/${btn.dataset.remove}`, { method: "DELETE" });
+        await refreshImages(null);
+      } catch (e) {
+        const errEl = detail.querySelector(`[data-uperr="${btn.dataset.remove}"]`);
+        if (errEl) errEl.textContent = e.message;
+      }
+    }));
 
   const pushBtn = $("#push-meta", detail);
   if (pushBtn) pushBtn.addEventListener("click", async () => {
