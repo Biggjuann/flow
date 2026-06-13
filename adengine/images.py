@@ -25,10 +25,14 @@ import httpx
 
 ImageProvider = Callable[[str], Optional[bytes]]
 
-# Appended to every image_prompt so output is ad-appropriate.
+# Appended to every image_prompt so output is ad-appropriate. The UI guard is a
+# backstop: never render fabricated app interfaces/screenshots, which look fake
+# (and can breach Meta policy) — show real-world subjects and outcomes instead.
 STYLE_SUFFIX = (
-    ", professional advertising photography, vibrant, high detail, "
-    "clean composition, square 1:1 framing, no text, no watermark, no logo"
+    ", professional advertising photography, real-world scene, vibrant, high detail, "
+    "clean composition, square 1:1 framing, no text, no watermark, no logo, "
+    "no app user interface, no screenshots, no phone screen content, "
+    "no fabricated screens, dashboards, or on-screen text"
 )
 
 OPENAI_BASE = "https://api.openai.com/v1"
