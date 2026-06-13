@@ -15,6 +15,7 @@ import json
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -22,6 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from adengine import launcher as meta_launcher
+from adengine import optimizer as optimizer_mod
 from adengine import pipeline
 from adengine.schemas import ConversionPath
 
@@ -29,12 +31,14 @@ RUNS_BASE = Path(os.environ.get("ADENGINE_RUNS_DIR", "runs"))
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 LAUNCH_FILE = "launch_result.json"
+OPTIMIZE_LOG_FILE = "optimization_log.json"
 
 ARTIFACTS = {
     "brand_dna": pipeline.BRAND_DNA_FILE,
     "ads": pipeline.ADS_FILE,
     "scored_package": pipeline.SCORED_FILE,
     "launch_result": LAUNCH_FILE,
+    "optimization_log": OPTIMIZE_LOG_FILE,
 }
 
 app = FastAPI(title="AdEngine", version="0.1.0")
@@ -150,6 +154,10 @@ def get_artifact(run_id: str, name: str) -> JSONResponse:
 class LaunchRequest(BaseModel):
     daily_budget_usd: float = Field(default=20.0, ge=1, le=10_000)
     country: str = Field(default="US", min_length=2, max_length=2)
+    split: bool = Field(
+        default=True,
+        description="A/B split: one adset per top ad so Meta's learning is isolated",
+    )
 
 
 @app.post("/runs/{run_id}/launch")
@@ -179,6 +187,7 @@ def launch_run(run_id: str, request: LaunchRequest) -> dict:
             country=request.country.upper(),
             pixel_id=launcher.pixel_id,
             app_id=launcher.app_id,
+            split=request.split,
         )
         result = launcher.launch(plan)
     except meta_launcher.MetaConfigError as exc:
@@ -193,6 +202,58 @@ def launch_run(run_id: str, request: LaunchRequest) -> dict:
     )
     (run_dir / LAUNCH_FILE).write_text(json.dumps(body, indent=2))
     return body
+
+
+class OptimizeRequest(BaseModel):
+    apply: bool = Field(
+        default=False,
+        description="Execute the automatic actions (pause losers, bounded budget shifts)",
+    )
+    target_cpa_usd: float | None = Field(default=None, ge=0.5, le=100_000)
+    date_preset: str = Field(default="last_7d", pattern=r"^[a-z0-9_]+$")
+
+
+@app.post("/runs/{run_id}/optimize")
+def optimize_run(run_id: str, request: OptimizeRequest) -> dict:
+    """Read live campaign performance, recommend actions, optionally apply them."""
+    run_dir = _run_dir_for(run_id)
+    launch_path = run_dir / LAUNCH_FILE
+    if not launch_path.exists():
+        raise HTTPException(status_code=409, detail="run has not been launched to Meta yet")
+    campaign_id = json.loads(launch_path.read_text()).get("campaign_id")
+    if not campaign_id:
+        raise HTTPException(status_code=409, detail="launch result has no campaign id")
+
+    try:
+        launcher = meta_launcher.MetaLauncher.from_env()
+        optimizer = optimizer_mod.Optimizer(
+            launcher,
+            target_cpa_cents=(
+                int(round(request.target_cpa_usd * 100)) if request.target_cpa_usd else None
+            ),
+        )
+        snapshots = optimizer.fetch_snapshots(campaign_id, date_preset=request.date_preset)
+        decisions = optimizer.decide(snapshots)
+        applied = optimizer.apply(decisions) if request.apply else []
+    except meta_launcher.MetaConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except meta_launcher.MetaAPIError as exc:
+        raise HTTPException(status_code=502, detail=f"Meta API error: {exc}")
+
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "campaign_id": campaign_id,
+        "date_preset": request.date_preset,
+        "applied_mode": request.apply,
+        "snapshots": [s.model_dump(mode="json") for s in snapshots],
+        "decisions": [d.model_dump(mode="json") for d in decisions],
+        "applied": [a.model_dump(mode="json") for a in applied],
+    }
+    log_path = run_dir / OPTIMIZE_LOG_FILE
+    history = json.loads(log_path.read_text()) if log_path.exists() else []
+    history.append(record)
+    log_path.write_text(json.dumps(history, indent=2))
+    return record
 
 
 @app.get("/runs/{run_id}/report")

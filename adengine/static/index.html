@@ -334,6 +334,15 @@ async function renderDetail(run) {
           <a href="${esc(L.ads_manager_url || "https://adsmanager.facebook.com")}" target="_blank">Review &amp; activate in Ads Manager →</a>
           <div class="ids">${esc(ids)}</div>
           ${notes ? `<ul class="ids">${notes}</ul>` : ""}
+        </div>
+        <div class="launch-meta">
+          <label>Target CPA $</label>
+          <input type="number" id="target-cpa" placeholder="e.g. 30" min="1" step="1">
+          <button id="check-perf">Check performance</button>
+          <button id="apply-perf" title="Pause clear losers and shift budget (±20%) toward winners">Apply recommended actions</button>
+          <span class="note">Reads live Insights (last 7 days). <b>Check</b> only recommends; <b>Apply</b> pauses losing ads and makes bounded budget shifts toward winners. Tip: hit this on a schedule with a Railway cron calling <code>POST /runs/&lt;id&gt;/optimize</code>.</span>
+          <span class="err2" id="perf-error"></span>
+          <div id="perf-result" style="flex-basis:100%"></div>
         </div>`;
     } else if (pkg.launch_ready_count > 0) {
       const opt = [];
@@ -347,6 +356,7 @@ async function renderDetail(run) {
           <input type="number" id="budget" value="20" min="1" step="1">
           <label>Country</label>
           <input type="text" id="country" value="US" maxlength="2" style="width:54px">
+          <label title="One adset per top ad (max 5) — isolates Meta's learning so the winner emerges fast"><input type="checkbox" id="split" checked> A/B split</label>
           <button id="push-meta" ${health.meta_configured ? "" : "disabled title='Set META_* server variables to enable'"}>Push ${pkg.launch_ready_count} ads to Meta</button>
           <span class="note">Creates the campaign, adset, and ads <b>PAUSED</b> — nothing spends until you activate it in Ads Manager. Objective is chosen from the brand's conversion path; destination links are tagged for attribution.${optNote}${health.meta_configured ? "" : " <b>Meta not configured</b> — set META_ACCESS_TOKEN / META_AD_ACCOUNT_ID / META_PAGE_ID."}</span>
           <span class="err2" id="launch-error"></span>
@@ -382,6 +392,7 @@ async function renderDetail(run) {
         body: JSON.stringify({
           daily_budget_usd: parseFloat($("#budget", detail).value) || 20,
           country: ($("#country", detail).value || "US").toUpperCase(),
+          split: $("#split", detail) ? $("#split", detail).checked : true,
         }),
       });
       delete detailCache[run.run_id];
@@ -392,6 +403,50 @@ async function renderDetail(run) {
       pushBtn.textContent = `Push ${run.launch_ready ?? ""} ads to Meta`;
     }
   });
+
+  const wirePerf = (btnId, apply) => {
+    const btn = $(btnId, detail);
+    if (!btn) return;
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      $("#perf-error", detail).textContent = "";
+      try {
+        const cpa = parseFloat($("#target-cpa", detail).value);
+        const rec = await api(`/runs/${run.run_id}/optimize`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ apply, target_cpa_usd: isNaN(cpa) ? null : cpa }),
+        });
+        $("#perf-result", detail).innerHTML = renderPerf(rec);
+      } catch (e) {
+        $("#perf-error", detail).textContent = e.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  };
+  wirePerf("#check-perf", false);
+  wirePerf("#apply-perf", true);
+}
+
+function renderPerf(rec) {
+  const money = c => c == null ? "—" : `$${(c / 100).toFixed(2)}`;
+  const rows = (rec.snapshots || []).map(s => `
+    <tr><td>${esc(s.ad_id)}</td><td align="right">${s.impressions.toLocaleString()}</td><td align="right">${s.clicks}</td>
+    <td align="right">${s.ctr != null ? (s.ctr * 100).toFixed(2) + "%" : "—"}</td><td align="right">${money(s.spend_cents)}</td>
+    <td align="right">${s.conversions}</td><td align="right">${money(s.cpa_cents)}</td><td align="right">${s.frequency ?? "—"}</td></tr>`).join("");
+  const decisions = (rec.decisions || []).map(d =>
+    `<li><b>${esc(d.action)}</b> ${esc(d.ad_id)} — ${esc(d.reason)}</li>`).join("");
+  const applied = (rec.applied || []).map(a =>
+    `<li>${a.ok ? "✅" : "⏸"} <b>${esc(a.action)}</b> ${esc(a.ad_id)} — ${esc(a.detail)}</li>`).join("");
+  if (!rows) return `<p class="step">No delivery data yet — Meta reports nothing until the campaign is active and serving.</p>`;
+  return `
+    <table style="border-collapse:collapse;width:100%;font-size:13px;margin-top:10px">
+      <tr style="color:var(--muted)"><th align="left">ad</th><th align="right">impr</th><th align="right">clicks</th><th align="right">CTR</th><th align="right">spend</th><th align="right">conv</th><th align="right">CPA</th><th align="right">freq</th></tr>
+      ${rows}
+    </table>
+    ${decisions ? `<p style="margin:10px 0 4px"><b>Recommended:</b></p><ul style="margin:0;padding-left:20px;font-size:13px">${decisions}</ul>` : `<p class="step" style="margin-top:10px">No actions recommended — keep collecting data.</p>`}
+    ${applied ? `<p style="margin:10px 0 4px"><b>Applied:</b></p><ul style="margin:0;padding-left:20px;font-size:13px">${applied}</ul>` : ""}`;
 }
 
 api("/healthz").then(h => { health = h; }).catch(() => {});

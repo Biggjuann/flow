@@ -175,6 +175,27 @@ def tag_destination(url: str, campaign: str, content: str) -> str:
     )
 
 
+MIN_ADSET_BUDGET_CENTS = 500  # don't split an adset below $5/day
+DEFAULT_MAX_ADSETS = 5
+
+
+def _merge_hints(ads: list[AdConcept], country: str) -> TargetAudienceHint:
+    interests: list[str] = []
+    age_lows: list[int] = []
+    age_highs: list[int] = []
+    for ad in ads:
+        hint = ad.target_audience_hint
+        interests.extend(i for i in hint.interests if i not in interests)
+        low, high = _parse_age_range(hint.age_range)
+        age_lows.append(low)
+        age_highs.append(high)
+    return TargetAudienceHint(
+        interests=interests[:10],
+        age_range=f"{min(age_lows)}-{max(age_highs)}",
+        geo_hint=country,
+    )
+
+
 def build_plan(
     package: ScoredPackage,
     conversion_path: ConversionPath,
@@ -183,8 +204,15 @@ def build_plan(
     country: str = "US",
     pixel_id: str | None = None,
     app_id: str | None = None,
+    split: bool = True,
+    max_adsets: int = DEFAULT_MAX_ADSETS,
 ) -> LaunchPlan:
-    """Derive a conversion-optimized LaunchPlan from the launch-ready ads."""
+    """Derive a conversion-optimized LaunchPlan from the launch-ready ads.
+
+    With ``split=True`` (default) each top ad gets its own adset with its own
+    audience hint and an even slice of the budget — Meta's learning is
+    isolated per ad, so the optimizer can find the winner fast.
+    """
     ready = [s for s in package.scored_ads if s.verdict is Verdict.launch_ready]
     if not ready:
         raise MetaConfigError("No launch-ready ads in this package — nothing to launch.")
@@ -221,25 +249,26 @@ def build_plan(
                 "Set META_PIXEL_ID to optimize for conversions; running Traffic for now."
             )
 
-    # ---- merged targeting ---------------------------------------------------
-    interests: list[str] = []
-    age_lows: list[int] = []
-    age_highs: list[int] = []
-    for ad in ads:
-        hint = ad.target_audience_hint
-        interests.extend(i for i in hint.interests if i not in interests)
-        low, high = _parse_age_range(hint.age_range)
-        age_lows.append(low)
-        age_highs.append(high)
-    merged = TargetAudienceHint(
-        interests=interests[:10],
-        age_range=f"{min(age_lows)}-{max(age_highs)}",
-        geo_hint=country,
-    )
+    # ---- A/B split: one adset per top ad so Meta's learning is isolated -----
+    # Each adset needs a workable budget; never split below MIN_ADSET_BUDGET.
+    if split:
+        affordable = max(1, daily_budget_cents // MIN_ADSET_BUDGET_CENTS)
+        n_adsets = min(max_adsets, len(ads), affordable)
+        launch_ads = ads[:n_adsets]  # already sorted by composite
+        held_back = ads[n_adsets:]
+        if held_back:
+            notes.append(
+                f"A/B split: launched top {n_adsets} ads in separate adsets; "
+                f"{len(held_back)} more launch-ready ads held in reserve for creative refresh "
+                f"({', '.join(a.id or '?' for a in held_back)})."
+            )
+    else:
+        launch_ads = ads
+        held_back = []
 
     name = f"AdEngine — {package.business_name}"
     creatives = []
-    for ad in ads:
+    for ad in launch_ads:
         message = (
             ad.primary_text
             if ad.primary_text.startswith(ad.hook)
@@ -257,19 +286,44 @@ def build_plan(
             )
         )
 
-    return LaunchPlan(
-        campaign=CampaignSpec(name=name, objective=objective),
-        adsets=[
+    if split:
+        # Per-ad adsets: each ad keeps its own audience hint — that's the test.
+        n = len(launch_ads)
+        base, remainder = divmod(daily_budget_cents, n)
+        adsets = []
+        for i, ad in enumerate(launch_ads):
+            hint = ad.target_audience_hint
+            adsets.append(
+                AdSetSpec(
+                    name=f"{name} — {ad.id} [{ad.framework.value}]",
+                    daily_budget_cents=base + (remainder if i == 0 else 0),
+                    optimization_goal=optimization,
+                    promoted_object=promoted_object,
+                    targeting=TargetAudienceHint(
+                        interests=hint.interests[:10],
+                        age_range=hint.age_range,
+                        geo_hint=country,
+                    ),
+                    countries=[country],
+                    ad_ids=[ad.id] if ad.id else [],
+                )
+            )
+    else:
+        adsets = [
             AdSetSpec(
                 name=f"{name} — adset 1",
                 daily_budget_cents=daily_budget_cents,
                 optimization_goal=optimization,
                 promoted_object=promoted_object,
-                targeting=merged,
+                targeting=_merge_hints(launch_ads, country),
                 countries=[country],
-                ad_ids=[ad.id for ad in ads if ad.id],
+                ad_ids=[ad.id for ad in launch_ads if ad.id],
             )
-        ],
+        ]
+
+    return LaunchPlan(
+        campaign=CampaignSpec(name=name, objective=objective),
+        adsets=adsets,
         creatives=creatives,
         source_package_url=package.source_url,
         notes=notes,
@@ -367,6 +421,37 @@ class MetaLauncher:
             if data:
                 resolved.append({"id": data[0]["id"], "name": data[0].get("name", name)})
         return resolved
+
+    # --------------------------------------------- optimizer support (Phase 3)
+
+    def get_campaign_insights(self, campaign_id: str, date_preset: str = "last_7d") -> list[dict]:
+        """Per-ad insights rows for a campaign."""
+        body = self._get(
+            f"/{campaign_id}/insights",
+            {
+                "level": "ad",
+                "fields": "ad_id,ad_name,impressions,clicks,spend,actions,frequency,date_start,date_stop",
+                "date_preset": date_preset,
+                "limit": 100,
+            },
+        )
+        return body.get("data") or []
+
+    def pause_ad(self, meta_ad_id: str) -> None:
+        self._post(f"/{meta_ad_id}", {"status": "PAUSED"})
+
+    def get_ad_adset_id(self, meta_ad_id: str) -> str | None:
+        return self._get(f"/{meta_ad_id}", {"fields": "adset_id"}).get("adset_id")
+
+    def get_adset_budget_cents(self, adset_id: str) -> int | None:
+        raw = self._get(f"/{adset_id}", {"fields": "daily_budget"}).get("daily_budget")
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def set_adset_budget_cents(self, adset_id: str, cents: int) -> None:
+        self._post(f"/{adset_id}", {"daily_budget": max(MIN_ADSET_BUDGET_CENTS, int(cents))})
 
     def upload_image(self, data: bytes, name: str) -> str | None:
         """Upload image bytes to the ad account; returns the image_hash."""

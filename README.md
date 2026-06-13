@@ -55,7 +55,8 @@ The underlying API:
 | GET | `/runs/{run_id}` | status, current step, artifact list |
 | GET | `/runs/{run_id}/artifacts/{name}` | `brand_dna` \| `ads` \| `scored_package` \| `launch_result` |
 | GET | `/runs/{run_id}/report` | `report.md` as markdown |
-| POST | `/runs/{run_id}/launch` `{"daily_budget_usd": 20, "country": "US"}` | push launch-ready ads to Meta (**created PAUSED**) |
+| POST | `/runs/{run_id}/launch` `{"daily_budget_usd": 20, "country": "US", "split": true}` | push launch-ready ads to Meta (**created PAUSED**, A/B split adsets) |
+| POST | `/runs/{run_id}/optimize` `{"apply": false, "target_cpa_usd": 30}` | read live performance, recommend/apply actions |
 | GET | `/healthz` | liveness + config check |
 
 ## Pushing ads to Meta
@@ -89,6 +90,12 @@ for servers — it doesn't expire).
 
 ### How it's built to drive sales
 
+- **A/B split by default.** Each top ad (max 5, by composite score) launches in
+  its **own adset** with its own audience hint and an even slice of the budget,
+  so Meta's learning is isolated per ad and the winner emerges fast. Extra
+  launch-ready ads are held in reserve for creative refresh. Adsets never split
+  below $5/day; uncheck "A/B split" in the UI to group everything in one adset.
+
 - **Objective from intent.** The campaign objective is derived from the brand's
   conversion path: `purchase → Sales/Purchase`, `lead_form → Leads/Lead`,
   `booking → Leads/Schedule`, `call → Leads/Contact`, `app_install → App
@@ -109,13 +116,46 @@ path to `app_install`, ad copy and CTAs (`INSTALL_MOBILE_APP`) are written for
 installs, and the launcher runs an install-optimized App Promotion campaign
 (set `META_APP_ID` to the Facebook app id linked to your iOS app).
 
+## Optimization loop (Phase 3)
+
+Once a campaign is live, `POST /runs/{id}/optimize` (or **Check performance**
+in the UI) reads per-ad Insights (last 7 days) and produces recommendations
+from deterministic rules — no LLM in the money loop:
+
+| Signal | Action |
+|---|---|
+| ≥3× target CPA spent, zero conversions | `kill_ad` (pause) |
+| CTR < 0.4% after 2,000+ impressions, no conversions | `kill_ad` (pause) |
+| Frequency ≥ 3.5 | `refresh_creative` (swap in a held-back ad) |
+| Best CPA in campaign, within target | `shift_budget` +20% |
+| CPA ≥ 2× the best converting ad | `shift_budget` −20% |
+| Best CPA but frequency ≥ 2.5 | `expand_audience` |
+| Meaningful spend, zero conversions campaign-wide | `alert_human` (check pixel wiring) |
+
+- **Check only** (`{"apply": false}`, default) recommends; nothing changes.
+- **Apply** (`{"apply": true}`) executes only the safe automatic actions:
+  pausing losers and bounded ±20% budget shifts (never below $5/day). Creative
+  refresh / audience expansion / anomalies stay human follow-ups.
+- Pass `target_cpa_usd` so the kill rule knows what "too expensive" means.
+- Every check is appended to `optimization_log.json` (full snapshots,
+  decisions, and applied actions — an audit trail).
+
+**Run it on a schedule:** add a Railway cron service (or any scheduler) that
+calls the endpoint daily:
+
+```bash
+curl -X POST https://<your-app>.up.railway.app/runs/<run_id>/optimize \
+  -H 'content-type: application/json' \
+  -d '{"apply": true, "target_cpa_usd": 30}'
+```
+
 ### Known limits
 
 - Interest targeting is resolved best-effort by name; unmatched interests are
   skipped.
-- One adset per campaign in v1 (all launch-ready ads share it).
 - True app-install optimization requires the app registered in your Meta
   Business account and linked to `META_APP_ID`.
+- The optimizer acts only on the campaign AdEngine created for that run.
 
 ## Deploying to Railway
 

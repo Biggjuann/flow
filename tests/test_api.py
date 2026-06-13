@@ -120,11 +120,12 @@ def test_launch_endpoint(client, monkeypatch, brand_dna, ads):
 
         def launch(self, plan):
             captured["plan"] = plan
+            all_ids = [aid for adset in plan.adsets for aid in adset.ad_ids]
             return LaunchResult(
                 campaign_id="cmp_1",
                 objective=plan.campaign.objective.value,
-                adset_ids=["as_1"],
-                ad_ids={aid: f"meta_{aid}" for aid in plan.adsets[0].ad_ids},
+                adset_ids=[f"as_{i}" for i in range(len(plan.adsets))],
+                ad_ids={aid: f"meta_{aid}" for aid in all_ids},
             )
 
     monkeypatch.setattr(
@@ -138,8 +139,11 @@ def test_launch_endpoint(client, monkeypatch, brand_dna, ads):
     assert body["status"] == "PAUSED"
     assert body["objective"] == "OUTCOME_TRAFFIC"  # purchase path, no pixel -> traffic
     assert "act=999" in body["ads_manager_url"]
-    assert captured["plan"].adsets[0].daily_budget_cents == 5000
-    assert captured["plan"].adsets[0].ad_ids == ["ad_01", "ad_02", "ad_03"]
+    plan = captured["plan"]
+    # default A/B split: one adset per ready ad, budget split across them
+    assert len(plan.adsets) == 3
+    assert sum(a.daily_budget_cents for a in plan.adsets) == 5000
+    assert [aid for a in plan.adsets for aid in a.ad_ids] == ["ad_01", "ad_02", "ad_03"]
 
     # result persisted + exposed as an artifact
     status = client.get(f"/runs/{run_id}").json()
@@ -168,3 +172,68 @@ def test_launch_unconfigured_returns_400(client, monkeypatch, brand_dna, ads):
     response = client.post(f"/runs/{run_id}/launch", json={})
     assert response.status_code == 400
     assert "META_ACCESS_TOKEN" in response.json()["detail"]
+
+
+# ------------------------------------------------------------------ optimize
+
+def test_optimize_endpoint(client, monkeypatch):
+    import json as _json
+
+    from adengine import api as api_module
+
+    run_id = client.post("/runs", json={"url": "acmecoffee.example"}).json()["run_id"]
+    run_dir = api_module.RUNS_BASE / run_id
+
+    # not launched yet -> 409
+    assert client.post(f"/runs/{run_id}/optimize", json={}).status_code == 409
+
+    (run_dir / api_module.LAUNCH_FILE).write_text(_json.dumps({"campaign_id": "cmp_1"}))
+
+    class FakeLauncher:
+        paused = []
+
+        def get_campaign_insights(self, campaign_id, date_preset="last_7d"):
+            assert campaign_id == "cmp_1"
+            return [
+                {
+                    "ad_id": "120211",
+                    "ad_name": "AdEngine ad_01",
+                    "impressions": "3000",
+                    "clicks": "5",
+                    "spend": "95.00",
+                    "date_start": "2026-06-06",
+                    "date_stop": "2026-06-12",
+                    "actions": [],
+                }
+            ]
+
+        def pause_ad(self, meta_ad_id):
+            self.paused.append(meta_ad_id)
+
+    fake = FakeLauncher()
+    monkeypatch.setattr(
+        api_module.meta_launcher.MetaLauncher, "from_env", classmethod(lambda cls: fake)
+    )
+
+    # check only: decisions recommended, nothing applied
+    body = client.post(
+        f"/runs/{run_id}/optimize", json={"target_cpa_usd": 30}
+    ).json()
+    assert body["campaign_id"] == "cmp_1"
+    assert body["snapshots"][0]["ad_id"] == "ad_01"
+    assert body["decisions"][0]["action"] == "kill_ad"  # $95 spent, 0 conv, $30 target
+    assert body["applied"] == []
+    assert fake.paused == []
+
+    # apply: the kill executes
+    body = client.post(
+        f"/runs/{run_id}/optimize", json={"target_cpa_usd": 30, "apply": True}
+    ).json()
+    applied = [a for a in body["applied"] if a["action"] == "kill_ad"]
+    assert applied and applied[0]["ok"]
+    assert fake.paused == ["120211"]
+
+    # history accumulates and is exposed as an artifact
+    log = client.get(f"/runs/{run_id}/artifacts/optimization_log").json()
+    assert len(log) == 2
+    assert "optimization_log" in client.get(f"/runs/{run_id}").json()["artifacts"]

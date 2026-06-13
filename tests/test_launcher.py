@@ -49,8 +49,47 @@ def test_build_plan_traffic_without_pixel(brand_dna, ads):
     assert plan.campaign.objective == CampaignObjective.OUTCOME_TRAFFIC
     assert plan.adsets[0].optimization_goal == OptimizationGoal.LINK_CLICKS
     assert plan.adsets[0].promoted_object is None
-    assert plan.adsets[0].ad_ids == ["ad_01", "ad_02", "ad_03"]
+    # default A/B split: one adset per ready ad
+    assert [a.ad_ids for a in plan.adsets] == [["ad_01"], ["ad_02"], ["ad_03"]]
     assert any("META_PIXEL_ID" in n for n in plan.notes)
+
+
+def test_build_plan_split_budget_and_targeting(brand_dna, ads):
+    package = make_package(brand_dna, ads, ready_count=3)
+    plan = build_plan(package, ConversionPath.purchase, 2000, "https://acme.example")
+    budgets = [a.daily_budget_cents for a in plan.adsets]
+    assert sum(budgets) == 2000
+    assert max(budgets) - min(budgets) <= 2  # near-even split, remainder to first
+    # each adset keeps its own ad's audience hint (that's the test)
+    assert plan.adsets[0].targeting.interests == ads[0].target_audience_hint.interests
+    # adset names carry ad id + framework for readability in Ads Manager
+    assert "ad_01" in plan.adsets[0].name
+
+
+def test_build_plan_split_respects_min_budget_and_cap(brand_dna, ads):
+    # $7/day across 3 ready ads -> only 1 adset is affordable at $5 minimum
+    package = make_package(brand_dna, ads, ready_count=3)
+    plan = build_plan(package, ConversionPath.purchase, 700, "https://acme.example")
+    assert len(plan.adsets) == 1
+    assert plan.adsets[0].daily_budget_cents == 700
+    assert any("held in reserve" in n for n in plan.notes)
+
+    # 8 ready ads, big budget -> capped at 5 adsets, extras held back
+    package = make_package(brand_dna, ads, ready_count=8)
+    plan = build_plan(package, ConversionPath.purchase, 10_000, "https://acme.example")
+    assert len(plan.adsets) == 5
+    assert len(plan.creatives) == 5
+    assert any("held in reserve" in n for n in plan.notes)
+
+
+def test_build_plan_grouped_mode(brand_dna, ads):
+    package = make_package(brand_dna, ads, ready_count=3)
+    plan = build_plan(
+        package, ConversionPath.purchase, 2000, "https://acme.example", split=False
+    )
+    assert len(plan.adsets) == 1
+    assert plan.adsets[0].ad_ids == ["ad_01", "ad_02", "ad_03"]
+    assert plan.adsets[0].daily_budget_cents == 2000
 
 
 def test_build_plan_conversion_optimized_with_pixel(brand_dna, ads):
@@ -160,7 +199,7 @@ def test_launch_creates_everything_paused(brand_dna, ads, graph):
 
     paths = [p for p, _ in graph.posts]
     assert paths.count("/v21.0/act_1234567890/campaigns") == 1
-    assert paths.count("/v21.0/act_1234567890/adsets") == 1
+    assert paths.count("/v21.0/act_1234567890/adsets") == 3  # A/B split: one per ad
     assert paths.count("/v21.0/act_1234567890/adcreatives") == 3
     assert paths.count("/v21.0/act_1234567890/ads") == 3
 
@@ -168,11 +207,15 @@ def test_launch_creates_everything_paused(brand_dna, ads, graph):
         if path.endswith(("/campaigns", "/adsets", "/ads")):
             assert body["status"] == "PAUSED", path
 
-    adset_body = next(b for p, b in graph.posts if p.endswith("/adsets"))
-    assert adset_body["daily_budget"] == "2000"
-    assert json.loads(adset_body["promoted_object"]) == {"pixel_id": "px_1", "custom_event_type": "PURCHASE"}
-    targeting = json.loads(adset_body["targeting"])
-    assert targeting["flexible_spec"][0]["interests"][0]["id"] == "601"
+    adset_bodies = [b for p, b in graph.posts if p.endswith("/adsets")]
+    assert sum(int(b["daily_budget"]) for b in adset_bodies) == 2000
+    for adset_body in adset_bodies:
+        assert json.loads(adset_body["promoted_object"]) == {
+            "pixel_id": "px_1",
+            "custom_event_type": "PURCHASE",
+        }
+        targeting = json.loads(adset_body["targeting"])
+        assert targeting["flexible_spec"][0]["interests"][0]["id"] == "601"
 
     creative_body = next(b for p, b in graph.posts if p.endswith("/adcreatives"))
     spec = json.loads(creative_body["object_story_spec"])
