@@ -1,10 +1,12 @@
 """FastAPI service wrapping the pipeline — the Railway deployment surface.
 
+    GET  /                           web UI (paste a URL, watch the run, browse results)
     POST /runs {"url": "..."}        start a run (async), returns run_id
     GET  /runs                       list runs
     GET  /runs/{run_id}              status + available artifacts
     GET  /runs/{run_id}/artifacts/{name}   brand_dna | ads | scored_package (JSON)
     GET  /runs/{run_id}/report       report.md (markdown)
+    POST /runs/{run_id}/launch       push launch-ready ads to Meta (created PAUSED)
     GET  /healthz                    liveness + config check
 """
 from __future__ import annotations
@@ -16,18 +18,22 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
+from adengine import launcher as meta_launcher
 from adengine import pipeline
 
 RUNS_BASE = Path(os.environ.get("ADENGINE_RUNS_DIR", "runs"))
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
+LAUNCH_FILE = "launch_result.json"
+
 ARTIFACTS = {
     "brand_dna": pipeline.BRAND_DNA_FILE,
     "ads": pipeline.ADS_FILE,
     "scored_package": pipeline.SCORED_FILE,
+    "launch_result": LAUNCH_FILE,
 }
 
 app = FastAPI(title="AdEngine", version="0.1.0")
@@ -76,11 +82,23 @@ def _run_summary(run_dir: Path) -> dict:
     }
 
 
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+@app.get("/", include_in_schema=False)
+def index() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html")
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     return {
         "ok": True,
         "api_key_configured": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "meta_configured": all(
+            os.environ.get(var)
+            for var in ("META_ACCESS_TOKEN", "META_AD_ACCOUNT_ID", "META_PAGE_ID")
+        ),
     }
 
 
@@ -120,6 +138,46 @@ def get_artifact(run_id: str, name: str) -> JSONResponse:
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"{name} not generated yet")
     return JSONResponse(content=json.loads(path.read_text()))
+
+
+class LaunchRequest(BaseModel):
+    daily_budget_usd: float = Field(default=20.0, ge=1, le=10_000)
+    country: str = Field(default="US", min_length=2, max_length=2)
+
+
+@app.post("/runs/{run_id}/launch")
+def launch_run(run_id: str, request: LaunchRequest) -> dict:
+    """Push the run's launch-ready ads to Meta. Everything is created PAUSED."""
+    run_dir = _run_dir_for(run_id)
+    if not (run_dir / pipeline.SCORED_FILE).exists():
+        raise HTTPException(status_code=409, detail="run has no scored package yet")
+
+    package = pipeline.load_scored_package(run_dir)
+    destination = package.source_url or pipeline.read_status(run_dir).get("url")
+    if not destination:
+        raise HTTPException(status_code=409, detail="run has no destination URL")
+
+    try:
+        launcher = meta_launcher.MetaLauncher.from_env()
+        plan = meta_launcher.build_plan(
+            package,
+            daily_budget_cents=int(round(request.daily_budget_usd * 100)),
+            destination_url=destination,
+            country=request.country.upper(),
+        )
+        result = launcher.launch(plan)
+    except meta_launcher.MetaConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except meta_launcher.MetaAPIError as exc:
+        raise HTTPException(status_code=502, detail=f"Meta API rejected the launch: {exc}")
+
+    body = result.model_dump(mode="json")
+    body["ads_manager_url"] = (
+        "https://adsmanager.facebook.com/adsmanager/manage/campaigns"
+        f"?act={launcher.ad_account_id.removeprefix('act_')}"
+    )
+    (run_dir / LAUNCH_FILE).write_text(json.dumps(body, indent=2))
+    return body
 
 
 @app.get("/runs/{run_id}/report")

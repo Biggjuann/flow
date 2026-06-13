@@ -1,6 +1,6 @@
 import pytest
 
-from adengine.launcher import CampaignObjective, CampaignSpec, LaunchPlan, MetaLauncher
+from adengine.launcher import CampaignObjective, CampaignSpec, LaunchPlan
 from adengine.optimizer import OptimizationAction, Optimizer, PerformanceSnapshot
 
 
@@ -9,14 +9,6 @@ def test_launch_plan_schema_round_trips():
         campaign=CampaignSpec(name="Acme — Q3", objective=CampaignObjective.OUTCOME_SALES)
     )
     assert LaunchPlan.model_validate_json(plan.model_dump_json()) == plan
-
-
-def test_meta_launcher_methods_are_stubs():
-    launcher = MetaLauncher(access_token="t", ad_account_id="act_1")
-    with pytest.raises(NotImplementedError):
-        launcher.create_campaign(
-            CampaignSpec(name="x", objective=CampaignObjective.OUTCOME_LEADS)
-        )
 
 
 def test_optimizer_stub_and_action_enum():

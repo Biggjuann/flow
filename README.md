@@ -32,20 +32,58 @@ Every run gets its own `runs/<timestamp>-<domain>/` folder containing
 re-running against the same dir (`--run-dir`) skips steps whose artifacts
 already exist, unless `--force`.
 
-## Web API (what runs on Railway)
+## Web app (what runs on Railway)
 
 ```bash
 uv run uvicorn adengine.api:app --reload
 ```
 
+Open `http://localhost:8000/` for the **web UI**: paste a URL, watch the run
+progress live, browse scored ad cards / the rendered report / the Brand DNA,
+and push the launch-ready ads to Meta with one click.
+
+The underlying API:
+
 | Method | Path | Purpose |
 |---|---|---|
+| GET | `/` | web UI |
 | POST | `/runs` `{"url": "...", "force": false}` | start a run (async), returns `run_id` |
 | GET | `/runs` | list runs |
 | GET | `/runs/{run_id}` | status, current step, artifact list |
-| GET | `/runs/{run_id}/artifacts/{name}` | `brand_dna` \| `ads` \| `scored_package` |
+| GET | `/runs/{run_id}/artifacts/{name}` | `brand_dna` \| `ads` \| `scored_package` \| `launch_result` |
 | GET | `/runs/{run_id}/report` | `report.md` as markdown |
-| GET | `/healthz` | liveness + API-key check |
+| POST | `/runs/{run_id}/launch` `{"daily_budget_usd": 20, "country": "US"}` | push launch-ready ads to Meta (**created PAUSED**) |
+| GET | `/healthz` | liveness + config check |
+
+## Pushing ads to Meta
+
+`POST /runs/{id}/launch` (or the **Push to Meta** button in the UI) creates a
+campaign → adset → ads on your Meta ad account via the Marketing API.
+
+**Safety:** every object is created with `status=PAUSED`. Nothing spends money
+until you review and activate the campaign in Ads Manager.
+
+Required environment variables:
+
+| Env var | What it is |
+|---|---|
+| `META_ACCESS_TOKEN` | a (system) user access token with `ads_management` permission |
+| `META_AD_ACCOUNT_ID` | your ad account id (`act_...` or just the number) |
+| `META_PAGE_ID` | the Facebook Page the ads are published from |
+
+Getting the token: create an app at developers.facebook.com → add the
+Marketing API product → generate a token with `ads_management` +
+`pages_read_engagement` (a System User token from Business Settings is best
+for servers — it doesn't expire).
+
+v1 scope and known limits:
+- Campaign objective is **Traffic** (LINK_CLICKS). Sales/Leads objectives need
+  a pixel / lead form — later phase.
+- Creatives are **link ads**; Meta pulls the preview image from your site's
+  `og:image`. Swap in dedicated creative images in Ads Manager (each ad's
+  `image_prompt` in `ads.json` tells a designer/image model what to make).
+- Interest targeting is resolved best-effort by name; unmatched interests are
+  skipped.
 
 ## Deploying to Railway
 
@@ -75,6 +113,9 @@ curl https://<your-app>.up.railway.app/runs/<run_id>/report
 | `ADENGINE_MODEL` | `claude-sonnet-4-5` | model for extraction/generation/scoring |
 | `ADENGINE_RUNS_DIR` | `runs` | where the API stores run folders |
 | `ADENGINE_WORKERS` | `2` | concurrent pipeline runs in the API |
+| `META_ACCESS_TOKEN` | — | required for `/launch`; token with `ads_management` |
+| `META_AD_ACCOUNT_ID` | — | required for `/launch`; `act_...` or bare number |
+| `META_PAGE_ID` | — | required for `/launch`; publishing Page id |
 | `ADENGINE_PROMPTS_DIR` | `prompts/` | prompt template location |
 
 ## Development
