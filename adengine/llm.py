@@ -60,7 +60,11 @@ class LLMClient:
                 )
             import anthropic
 
-            client = anthropic.Anthropic(max_retries=3)
+            # Bound every call so a wedged connection or repeated overloads can't
+            # hang the pipeline. Defaults: 120s/request, 2 SDK retries.
+            timeout = float(os.environ.get("ADENGINE_LLM_TIMEOUT", "120"))
+            retries = int(os.environ.get("ADENGINE_LLM_RETRIES", "2"))
+            client = anthropic.Anthropic(timeout=timeout, max_retries=retries)
         self._client = client
         self.model = model or resolve_model()
         self.log_path = Path(log_path) if log_path else None

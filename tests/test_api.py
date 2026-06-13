@@ -237,3 +237,50 @@ def test_optimize_endpoint(client, monkeypatch):
     log = client.get(f"/runs/{run_id}/artifacts/optimization_log").json()
     assert len(log) == 2
     assert "optimization_log" in client.get(f"/runs/{run_id}").json()["artifacts"]
+
+
+# ------------------------------------------------------ orphan / restart recovery
+
+def test_reap_orphans_fails_stuck_runs(client, monkeypatch, tmp_path):
+    from adengine import api as api_module
+
+    # a run left "running" by a dead process
+    stuck = api_module.RUNS_BASE / "20260613-011609-arete.shop"
+    stuck.mkdir()
+    pipeline.write_status(stuck, state="running", step="score", url="https://arete.shop/")
+    # a completed run that must be left alone
+    done = api_module.RUNS_BASE / "20260613-010000-done.example"
+    done.mkdir()
+    pipeline.write_status(done, state="completed", step="done")
+
+    reaped = api_module.reap_orphans()
+    assert reaped == 1
+    assert pipeline.read_status(stuck)["state"] == "failed"
+    assert "restarted" in pipeline.read_status(stuck)["error"]
+    assert pipeline.read_status(done)["state"] == "completed"
+
+
+def test_reap_skips_inflight_runs(client):
+    from adengine import api as api_module
+
+    live = api_module.RUNS_BASE / "20260613-020000-live.example"
+    live.mkdir()
+    pipeline.write_status(live, state="running", step="generate")
+    api_module._inflight.add(live.name)
+    try:
+        assert api_module.reap_orphans() == 0
+        assert pipeline.read_status(live)["state"] == "running"
+    finally:
+        api_module._inflight.discard(live.name)
+
+
+def test_list_runs_ignores_non_run_dirs(client):
+    from adengine import api as api_module
+
+    # volume cruft like lost+found has no status.json and must not appear
+    (api_module.RUNS_BASE / "lost+found").mkdir()
+    run_id = client.post("/runs", json={"url": "acmecoffee.example"}).json()["run_id"]
+
+    runs = client.get("/runs").json()
+    assert [r["run_id"] for r in runs] == [run_id]
+    assert all(r["state"] != "unknown" for r in runs)

@@ -44,6 +44,47 @@ ARTIFACTS = {
 app = FastAPI(title="AdEngine", version="0.1.0")
 _executor = ThreadPoolExecutor(max_workers=int(os.environ.get("ADENGINE_WORKERS", "2")))
 
+# run_ids this process is actively executing — used to tell a live run apart
+# from one orphaned by a restart.
+_inflight: set[str] = set()
+_LIVE_STATES = {"queued", "running"}
+
+
+def _is_run_dir(path: Path) -> bool:
+    """A real run directory has a status.json (written at creation)."""
+    return path.is_dir() and (path / pipeline.STATUS_FILE).exists()
+
+
+def reap_orphans() -> int:
+    """Mark runs left 'running'/'queued' by a dead process as failed.
+
+    The in-process executor loses all work when the container restarts, but the
+    run's status.json on the (persistent) volume still says running — so the UI
+    would spin forever. At startup nothing is in flight, so any live-state run
+    on disk is an orphan.
+    """
+    if not RUNS_BASE.is_dir():
+        return 0
+    reaped = 0
+    for path in RUNS_BASE.iterdir():
+        if not _is_run_dir(path) or path.name in _inflight:
+            continue
+        status = pipeline.read_status(path)
+        if status.get("state") in _LIVE_STATES:
+            pipeline.write_status(
+                path,
+                state="failed",
+                error="Interrupted — the server restarted while this run was in progress. "
+                "Re-run the URL (existing steps are cached and will be skipped).",
+            )
+            reaped += 1
+    return reaped
+
+
+@app.on_event("startup")
+def _on_startup() -> None:
+    reap_orphans()
+
 
 class RunRequest(BaseModel):
     url: str = Field(min_length=4, description="Business website URL")
@@ -62,11 +103,14 @@ def _run_dir_for(run_id: str) -> Path:
 
 
 def _execute(url: str, run_dir: Path, force: bool) -> None:
+    _inflight.add(run_dir.name)
     try:
         pipeline.run_pipeline(url, run_dir, force=force)
     except Exception:
         # run_pipeline already recorded the failure in status.json
         pass
+    finally:
+        _inflight.discard(run_dir.name)
 
 
 def _run_summary(run_dir: Path) -> dict:
@@ -128,7 +172,7 @@ def create_run(request: RunRequest) -> dict:
 def list_runs() -> list[dict]:
     if not RUNS_BASE.is_dir():
         return []
-    run_dirs = sorted((d for d in RUNS_BASE.iterdir() if d.is_dir()), reverse=True)
+    run_dirs = sorted((d for d in RUNS_BASE.iterdir() if _is_run_dir(d)), reverse=True)
     return [_run_summary(d) for d in run_dirs]
 
 

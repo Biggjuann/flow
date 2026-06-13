@@ -5,6 +5,7 @@ disjoint half of the framework library, for variety.
 """
 from __future__ import annotations
 
+import os
 from concurrent.futures import ThreadPoolExecutor
 
 from adengine.llm import LLMClient
@@ -67,7 +68,10 @@ def generate_ads(
             pool.submit(_generate_batch, dna, llm, frameworks, count)
             for frameworks, count in zip(BATCH_FRAMEWORKS, counts)
         ]
-        ads = [ad for future in futures for ad in future.result()]
+        # Bound the wait so a wedged batch thread can't hang the pipeline forever.
+        # Generous ceiling: the LLMClient already times out each request.
+        deadline = float(os.environ.get("ADENGINE_BATCH_TIMEOUT", "600"))
+        ads = [ad for future in futures for ad in future.result(timeout=deadline)]
 
     for i, ad in enumerate(ads, start=1):
         ad.id = f"ad_{i:02d}"

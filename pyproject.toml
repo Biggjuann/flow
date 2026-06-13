@@ -20,6 +20,7 @@ adengine = "adengine.cli:app"
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "pytest-timeout>=2.3",
 ]
 
 [build-system]
@@ -31,3 +32,6 @@ packages = ["adengine"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Hard ceiling: no single test may hang. The suite is fully mocked and runs in
+# ~1s; any test that blocks (a real network call slipping in) fails fast.
+timeout = 30
