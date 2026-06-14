@@ -132,6 +132,57 @@ def image_path(images_dir: Path, ad_id: str) -> Path:
     return images_dir / f"{ad_id}.png"
 
 
+# Meta feed creative: 1080x1080 (1:1) is the recommended size. Everything that
+# ships to Meta is normalized to this so uploads and AI output are consistent.
+META_IMAGE_SIZE = 1080
+
+
+def _corner_color(im) -> tuple[int, int, int]:
+    w, h = im.size
+    pts = [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]
+    px = [im.getpixel(p) for p in pts]
+    return (
+        sum(p[0] for p in px) // 4,
+        sum(p[1] for p in px) // 4,
+        sum(p[2] for p in px) // 4,
+    )
+
+
+def normalize_for_meta(data: bytes, size: int = META_IMAGE_SIZE) -> bytes:
+    """Resize/pad image bytes to a square ``size``x``size`` PNG for Meta.
+
+    Scales to fit (upscaling small images to meet Meta's minimum), then pads to
+    an exact square on an edge-sampled background so nothing is cropped. If the
+    bytes can't be decoded as an image, returns them unchanged — never block a
+    launch on a normalization failure.
+    """
+    try:
+        import io
+
+        from PIL import Image, ImageOps
+    except Exception:
+        return data
+    try:
+        im = Image.open(io.BytesIO(data))
+        im.load()
+        im = ImageOps.exif_transpose(im)  # honor camera/phone orientation
+        if im.mode != "RGB":
+            im = im.convert("RGB")
+        fitted = ImageOps.contain(im, (size, size), method=Image.LANCZOS)
+        if fitted.size == (size, size):
+            canvas = fitted
+        else:
+            canvas = Image.new("RGB", (size, size), _corner_color(fitted))
+            canvas.paste(
+                fitted, ((size - fitted.width) // 2, (size - fitted.height) // 2)
+            )
+        out = io.BytesIO()
+        canvas.save(out, format="PNG", optimize=True)
+        return out.getvalue()
+    except Exception:
+        return data  # undecodable / corrupt — ship the original rather than fail
+
+
 # Magic-byte signatures for the formats Meta accepts as ad images.
 def sniff_image_type(data: bytes) -> str | None:
     if data[:8] == b"\x89PNG\r\n\x1a\n":
@@ -144,7 +195,7 @@ def sniff_image_type(data: bytes) -> str | None:
 
 
 def save_upload(images_dir: Path, ad_id: str, data: bytes) -> str:
-    """Persist a user-uploaded creative image. Returns its content type.
+    """Persist a user-uploaded creative image, sized for Meta.
 
     Raises ValueError if the bytes aren't a supported image format. Stored at
     the same path the launcher reads, so uploads ship to Meta automatically.
@@ -152,9 +203,10 @@ def save_upload(images_dir: Path, ad_id: str, data: bytes) -> str:
     content_type = sniff_image_type(data)
     if content_type is None:
         raise ValueError("unsupported image format — upload a PNG, JPEG, or GIF")
+    normalized = normalize_for_meta(data)
     images_dir.mkdir(parents=True, exist_ok=True)
-    image_path(images_dir, ad_id).write_bytes(data)
-    return content_type
+    image_path(images_dir, ad_id).write_bytes(normalized)
+    return sniff_image_type(normalized) or content_type
 
 
 def generate_previews(
@@ -194,7 +246,7 @@ def generate_previews(
 
         data = provider(prompt)
         if data:
-            path.write_bytes(data)
+            path.write_bytes(normalize_for_meta(data))
             items[ad_id] = {"ok": True, "source": "generated", "cached": False, "error": None}
             generated += 1
         else:

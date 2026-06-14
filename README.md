@@ -109,6 +109,12 @@ on any ad. PNG / JPEG / GIF, up to 8 MB.
 - **Remove** clears an ad's image and reverts it to the link-preview image.
 - Image priority at launch: **your upload → AI-generated preview → link
   preview**. Whatever shows on the card is exactly what ships to Meta.
+- **Auto-sized for Meta.** Every image that ships — AI-generated or your own
+  upload — is normalized to **1080×1080** (Meta's recommended 1:1 feed creative):
+  scaled to fit (small images upscaled to meet the minimum) and padded to a
+  square on an edge-matched background, so nothing is cropped. Upload any
+  size/ratio; it's made Meta-ready automatically. (If a file can't be decoded
+  it's shipped unchanged rather than blocking the launch.)
 
 If AI generation fails, the card shows **why** (e.g. *"gpt-image-1 requires a
 verified OpenAI organization"* or *"no quota — add billing"*) instead of

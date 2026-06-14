@@ -152,3 +152,50 @@ def test_locked_uploads_survive_regeneration(tmp_path, ads):
     assert manifest["ads"][ads[0].id]["source"] == "upload"
     assert manifest["ads"][ads[1].id]["source"] == "generated"
     assert len(calls) == 1  # only ad_02 hit the provider
+
+
+# ----------------------------------------------------- Meta sizing
+
+def _real_png(w, h, color=(20, 80, 160)) -> bytes:
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (w, h), color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _dims(data: bytes):
+    import io
+    from PIL import Image
+    return Image.open(io.BytesIO(data)).size
+
+
+def test_normalize_pads_portrait_to_square():
+    from adengine.images import META_IMAGE_SIZE, normalize_for_meta
+    out = normalize_for_meta(_real_png(400, 900))
+    assert _dims(out) == (META_IMAGE_SIZE, META_IMAGE_SIZE)
+
+
+def test_normalize_upscales_small_square():
+    from adengine.images import META_IMAGE_SIZE, normalize_for_meta
+    out = normalize_for_meta(_real_png(300, 300))
+    assert _dims(out) == (META_IMAGE_SIZE, META_IMAGE_SIZE)
+
+
+def test_normalize_passthrough_on_undecodable():
+    from adengine.images import normalize_for_meta
+    junk = b"\x89PNG\r\n\x1a\nnot-a-real-png"
+    assert normalize_for_meta(junk) == junk  # never block a launch
+
+
+def test_save_upload_sizes_to_meta(tmp_path):
+    from adengine.images import META_IMAGE_SIZE, save_upload
+    save_upload(tmp_path, "ad_01", _real_png(1200, 600))
+    assert _dims((tmp_path / "ad_01.png").read_bytes()) == (META_IMAGE_SIZE, META_IMAGE_SIZE)
+
+
+def test_generate_previews_sizes_to_meta(tmp_path, ads):
+    from adengine.images import META_IMAGE_SIZE, generate_previews
+    out = generate_previews(tmp_path, ads[:1], lambda p: _real_png(512, 768))
+    assert out["generated"] == 1
+    assert _dims((tmp_path / f"{ads[0].id}.png").read_bytes()) == (META_IMAGE_SIZE, META_IMAGE_SIZE)

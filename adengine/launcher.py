@@ -30,7 +30,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import httpx
 from pydantic import BaseModel, Field
 
-from adengine.images import ImageProvider, provider_from_env
+from adengine.images import ImageProvider, normalize_for_meta, provider_from_env
 from adengine.scraper import is_app_store_url
 from adengine.schemas import (
     AdConcept,
@@ -584,11 +584,16 @@ class MetaLauncher:
             return None  # creative falls back to link preview; never blocks a launch
 
     def _image_bytes(self, creative: AdCreativeSpec) -> bytes | None:
-        """Prefer a reviewed preview from image_dir; else generate on the fly."""
+        """Prefer a reviewed preview from image_dir; else generate on the fly.
+
+        Stored previews are already Meta-sized; on-the-fly generation is
+        normalized here so anything reaching Meta is 1080x1080.
+        """
         if self.image_dir is not None and creative.ad_concept_id:
             preview = self.image_dir / f"{creative.ad_concept_id}.png"
             if preview.exists():
                 return preview.read_bytes()
         if self.image_provider and creative.image_prompt:
-            return self.image_provider(creative.image_prompt)
+            data = self.image_provider(creative.image_prompt)
+            return normalize_for_meta(data) if data else None
         return None
