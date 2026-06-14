@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AdEngine — URL to scored Meta ad package</title>
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<style>
+  :root {
+    --bg: #14181d;
+    --panel: #1c2229;
+    --panel-2: #232b34;
+    --line: #2e3942;
+    --text: #e8e4da;
+    --muted: #9aa4ad;
+    --accent: #e8a33d;
+    --accent-dim: #b97f2c;
+    --green: #5fbf77;
+    --red: #e06c5c;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.55 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  h1, h2, h3 { font-family: Georgia, "Times New Roman", serif; font-weight: 600; }
+  a { color: var(--accent); }
+  header {
+    display: flex; align-items: baseline; gap: 14px;
+    padding: 22px 28px 18px; border-bottom: 1px solid var(--line);
+  }
+  header h1 { margin: 0; font-size: 26px; letter-spacing: .5px; }
+  header h1 .dot { color: var(--accent); }
+  header .tag { color: var(--muted); font-size: 13px; }
+  main { max-width: 1060px; margin: 0 auto; padding: 26px 28px 80px; }
+
+  .launch { display: flex; gap: 10px; margin-bottom: 8px; }
+  .launch input[type=url] {
+    flex: 1; padding: 13px 16px; font-size: 16px; color: var(--text);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px; outline: none;
+  }
+  .launch input[type=url]:focus { border-color: var(--accent-dim); }
+  .launch button {
+    padding: 13px 22px; font-size: 15px; font-weight: 600; cursor: pointer;
+    color: #18120a; background: var(--accent); border: none; border-radius: 8px;
+  }
+  .launch button:disabled { opacity: .5; cursor: default; }
+  #form-error { color: var(--red); font-size: 13px; min-height: 18px; margin: 0 0 18px; }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  #runs-panel { padding: 6px 0; margin-bottom: 26px; }
+  #runs-panel h2 { font-size: 15px; color: var(--muted); margin: 10px 18px; font-family: inherit; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; }
+  .run-row {
+    display: flex; align-items: center; gap: 12px; padding: 10px 18px;
+    border-top: 1px solid var(--line); cursor: pointer; font-size: 14px;
+  }
+  .run-row:hover { background: var(--panel-2); }
+  .run-row.active { background: var(--panel-2); box-shadow: inset 3px 0 0 var(--accent); }
+  .run-row .rid { font-family: var(--mono); font-size: 13px; }
+  .run-row .url { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .run-row .counts { color: var(--muted); font-size: 13px; white-space: nowrap; }
+  .empty { color: var(--muted); padding: 14px 18px; border-top: 1px solid var(--line); font-size: 14px; }
+
+  .badge {
+    font-size: 11px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase;
+    padding: 3px 9px; border-radius: 99px; white-space: nowrap;
+  }
+  .badge.queued, .badge.running { background: #3a3325; color: var(--accent); }
+  .badge.completed { background: #24382b; color: var(--green); }
+  .badge.failed { background: #402621; color: var(--red); }
+  .badge.unknown { background: var(--panel-2); color: var(--muted); }
+  .badge.launch_ready { background: #24382b; color: var(--green); }
+  .badge.blocked { background: #402621; color: var(--red); }
+
+  #detail { margin-top: 4px; }
+  #detail .head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+  #detail .head h2 { margin: 0; font-size: 22px; }
+  #detail .step { color: var(--muted); font-size: 13px; font-family: var(--mono); }
+  #detail .err { color: var(--red); font-family: var(--mono); font-size: 13px; white-space: pre-wrap; }
+
+  .spin {
+    width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent);
+    border-radius: 50%; display: inline-block; animation: spin .8s linear infinite; vertical-align: -2px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .tabs { display: flex; gap: 4px; margin: 18px 0 14px; border-bottom: 1px solid var(--line); }
+  .tabs button {
+    background: none; border: none; color: var(--muted); font-size: 14px; font-weight: 600;
+    padding: 9px 14px; cursor: pointer; border-bottom: 2px solid transparent;
+  }
+  .tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+
+  .gaps { background: #2c2517; border: 1px solid #4a3c1e; border-radius: 10px; padding: 14px 18px; margin-bottom: 16px; }
+  .gaps h3 { margin: 0 0 8px; font-size: 15px; color: var(--accent); }
+  .gaps ul { margin: 0; padding-left: 20px; }
+  .gaps li { margin: 3px 0; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; display: flex; flex-direction: column; gap: 8px; }
+  .card .top { display: flex; align-items: center; gap: 8px; }
+  .card .fw { font-family: var(--mono); font-size: 11px; color: var(--muted); background: var(--panel-2); padding: 2px 8px; border-radius: 99px; }
+  .card .score { margin-left: auto; font-family: var(--mono); font-size: 13px; color: var(--accent); }
+  .card .hook { font-size: 15px; font-weight: 650; line-height: 1.4; }
+  .card .body { color: var(--muted); font-size: 13px; white-space: pre-wrap; }
+  .ad-img-wrap { position: relative; }
+  .ad-img { width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); display: block; }
+  .img-tag { position: absolute; top: 8px; left: 8px; background: rgba(20,24,29,.85); color: var(--accent); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; padding: 3px 7px; border-radius: 99px; }
+  .ad-img-actions { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+  .upload-btn { color: var(--accent); cursor: pointer; font-weight: 600; }
+  .upload-btn:hover { text-decoration: underline; }
+  .link-btn { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0; }
+  .link-btn:hover { color: var(--red); text-decoration: underline; }
+  .up-err { color: var(--red); flex: 1; }
+  .ad-img-prompt { font-size: 12px; color: var(--muted); background: var(--panel-2); border: 1px dashed var(--line); border-radius: 8px; padding: 10px; line-height: 1.4; }
+  .ad-img-err { font-size: 12px; color: var(--red); background: #2a1a17; border: 1px solid #4a2820; border-radius: 8px; padding: 10px; }
+  .img-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; margin-bottom: 14px; }
+  .img-bar button { padding: 9px 16px; font-weight: 600; cursor: pointer; border: none; border-radius: 7px; color: #18120a; background: var(--accent); }
+  .img-bar button:disabled { opacity: .5; cursor: default; }
+  .img-bar .note { flex: 1; min-width: 220px; color: var(--muted); font-size: 12.5px; }
+  .img-bar .err2 { flex-basis: 100%; color: var(--red); font-size: 13px; }
+  .img-bar code { font-family: var(--mono); font-size: 12px; }
+  .card .meta { font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 8px; }
+  .card .meta b { color: var(--text); font-weight: 600; }
+  .card .review { font-size: 12.5px; font-style: italic; color: var(--muted); }
+  .card .fixes { font-size: 12.5px; color: var(--red); margin: 0; padding-left: 18px; }
+
+  .launch-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 18px; margin: 18px 0 0; }
+  .launch-meta label { color: var(--muted); font-size: 13px; }
+  .launch-meta input, .launch-meta select {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 8px 10px; font-size: 14px; width: 90px;
+  }
+  .launch-meta button {
+    padding: 9px 18px; font-weight: 600; cursor: pointer; border: none; border-radius: 7px;
+    color: #18120a; background: var(--accent);
+  }
+  .launch-meta button:disabled { opacity: .5; cursor: default; }
+  .launch-meta .note { flex-basis: 100%; color: var(--muted); font-size: 12.5px; }
+  .launch-meta .err2 { flex-basis: 100%; color: var(--red); font-size: 13px; }
+  .launch-done { background: #1f2e24; border: 1px solid #2e4636; border-radius: 10px; padding: 14px 18px; margin: 18px 0 0; font-size: 14px; }
+  .launch-done .ids { font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+
+  #report-md { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 28px 24px; }
+  #report-md h1, #report-md h2 { border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+  #report-md blockquote { border-left: 3px solid var(--accent-dim); margin: 10px 0; padding: 2px 16px; color: var(--text); background: var(--panel-2); border-radius: 0 8px 8px 0; }
+  #report-md table { border-collapse: collapse; }
+  #report-md th, #report-md td { border: 1px solid var(--line); padding: 6px 12px; font-size: 13.5px; }
+  #report-md code, pre.raw { font-family: var(--mono); font-size: 13px; }
+  pre.raw { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; overflow: auto; white-space: pre-wrap; }
+  .dl { font-size: 13px; color: var(--muted); margin-top: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>AdEngine<span class="dot">.</span></h1>
+  <span class="tag">paste a website &rarr; get a scored Meta ad campaign package</span>
+</header>
+<main>
+  <form class="launch" id="launch-form">
+    <input type="url" id="url" placeholder="https://yourbusiness.com" required>
+    <button id="go" type="submit">Build campaign</button>
+  </form>
+  <p id="form-error"></p>
+
+  <div class="panel" id="runs-panel">
+    <h2>Runs</h2>
+    <div id="runs-list"><div class="empty">No runs yet — paste a URL above to start one.</div></div>
+  </div>
+
+  <section id="detail" hidden></section>
+</main>
+
+<script>
+"use strict";
+const $ = (sel, el) => (el || document).querySelector(sel);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+let runs = [];
+let openId = null;
+let activeTab = "ads";
+let detailCache = {};   // run_id -> {package, dna, report}
+let pollTimer = null;
+let health = {};        // server config flags from /healthz
+
+async function api(path, options) {
+  const res = await fetch(path, options);
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch (e) {}
+    throw new Error(detail);
+  }
+  const type = res.headers.get("content-type") || "";
+  return type.includes("json") ? res.json() : res.text();
+}
+
+const isLive = s => s === "queued" || s === "running";
+
+function badge(state) {
+  const cls = ["queued","running","completed","failed","launch_ready","blocked"].includes(state) ? state : "unknown";
+  const spin = isLive(state) ? '<span class="spin"></span> ' : "";
+  return `${spin}<span class="badge ${cls}">${esc(state)}</span>`;
+}
+
+function renderRuns() {
+  const list = $("#runs-list");
+  if (!runs.length) {
+    list.innerHTML = '<div class="empty">No runs yet — paste a URL above to start one.</div>';
+    return;
+  }
+  list.innerHTML = runs.map(r => `
+    <div class="run-row ${r.run_id === openId ? "active" : ""}" data-id="${esc(r.run_id)}">
+      ${badge(r.state)}
+      <span class="rid">${esc(r.run_id)}</span>
+      <span class="url">${esc(r.url || "")}</span>
+      <span class="counts">${r.launch_ready != null ? `${r.launch_ready} ready / ${r.blocked} blocked` : esc(r.step || "")}</span>
+    </div>`).join("");
+  list.querySelectorAll(".run-row").forEach(row =>
+    row.addEventListener("click", () => openRun(row.dataset.id)));
+}
+
+async function refresh() {
+  try { runs = await api("/runs"); } catch (e) { return; }
+  renderRuns();
+  if (openId) {
+    const current = runs.find(r => r.run_id === openId);
+    if (current) renderDetail(current);
+  }
+  clearTimeout(pollTimer);
+  if (runs.some(r => isLive(r.state))) pollTimer = setTimeout(refresh, 2500);
+}
+
+$("#launch-form").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const button = $("#go");
+  $("#form-error").textContent = "";
+  button.disabled = true;
+  try {
+    const created = await api("/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: $("#url").value.trim() }),
+    });
+    openId = created.run_id;
+    detailCache = {};
+    await refresh();
+  } catch (e) {
+    $("#form-error").textContent = "Could not start run: " + e.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+
+async function openRun(id) {
+  openId = id;
+  activeTab = "ads";
+  renderRuns();
+  const run = runs.find(r => r.run_id === id);
+  if (run) renderDetail(run);
+}
+
+async function loadArtifacts(run) {
+  if (detailCache[run.run_id]) return detailCache[run.run_id];
+  const out = {};
+  const grab = async (key, path) => { try { out[key] = await api(path); } catch (e) {} };
+  await Promise.all([
+    run.artifacts.includes("scored_package") && grab("package", `/runs/${run.run_id}/artifacts/scored_package`),
+    run.artifacts.includes("brand_dna") && grab("dna", `/runs/${run.run_id}/artifacts/brand_dna`),
+    run.artifacts.includes("report") && grab("report", `/runs/${run.run_id}/report`),
+    run.artifacts.includes("launch_result") && grab("launch", `/runs/${run.run_id}/artifacts/launch_result`),
+    run.artifacts.includes("images_manifest") && grab("images", `/runs/${run.run_id}/artifacts/images_manifest`),
+  ]);
+  if (!isLive(run.state)) detailCache[run.run_id] = out;
+  return out;
+}
+
+function adCard(scored, runId, images) {
+  const ad = scored.ad, review = scored.review;
+  const fixes = scored.verdict === "blocked" && review.fix_suggestions.length
+    ? `<ul class="fixes">${review.fix_suggestions.map(f => `<li>${esc(f)}</li>`).join("")}</ul>` : "";
+  const img = images && images.ads ? images.ads[ad.id] : null;
+  const cb = (img && img._cachebust) || "";
+  let creative = "";
+  if (img && img.ok) {
+    const tag = img.source === "upload" ? `<span class="img-tag">your upload</span>` : "";
+    creative = `<div class="ad-img-wrap"><img class="ad-img" src="/runs/${esc(runId)}/images/${esc(ad.id)}?t=${cb}" alt="creative">${tag}</div>`;
+  } else if (img && img.error) {
+    creative = `<div class="ad-img-err">⚠ image failed: ${esc(img.error)}</div>`;
+  } else {
+    creative = `<div class="ad-img-prompt">🖼 ${esc(ad.creative_direction.image_prompt)}</div>`;
+  }
+  const imgActions = `
+    <div class="ad-img-actions">
+      <label class="upload-btn">Upload image
+        <input type="file" accept="image/png,image/jpeg,image/gif" data-upload="${esc(ad.id)}" hidden>
+      </label>
+      ${img && img.ok ? `<button class="link-btn" data-remove="${esc(ad.id)}">Remove</button>` : ""}
+      <span class="up-err" data-uperr="${esc(ad.id)}"></span>
+    </div>`;
+  return `
+    <div class="card">
+      <div class="top">
+        <span class="badge ${esc(scored.verdict)}">${scored.verdict === "launch_ready" ? "ready" : "blocked"}</span>
+        <span class="fw">${esc(ad.framework)}</span>
+        <span class="score">${scored.composite.toFixed(2)} · policy ${review.policy_risk}/10</span>
+      </div>
+      ${creative}
+      ${imgActions}
+      <div class="hook">${esc(ad.hook)}</div>
+      <div class="body">${esc(ad.primary_text)}</div>
+      <div class="meta"><b>${esc(ad.headline)}</b> — ${esc(ad.description)} · <b>${esc(ad.cta_button)}</b><br>
+        ${esc(ad.target_audience_hint.interests.join(", ") || "broad")} · ${esc(ad.target_audience_hint.age_range)} · ${esc(ad.target_audience_hint.geo_hint || "")}</div>
+      <div class="review">&ldquo;${esc(review.rationale)}&rdquo;</div>
+      ${fixes}
+    </div>`;
+}
+
+function renderMarkdown(md) {
+  if (window.marked) {
+    // marked output is escaped where it matters, but our source is model-generated:
+    // render, then strip script tags defensively.
+    const html = marked.parse(md);
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    doc.querySelectorAll("script,iframe,object").forEach(n => n.remove());
+    return doc.body.innerHTML;
+  }
+  return `<pre class="raw">${esc(md)}</pre>`;
+}
+
+async function renderDetail(run) {
+  const detail = $("#detail");
+  detail.hidden = false;
+  const artifacts = await loadArtifacts(run);
+  const dna = artifacts.dna;
+
+  const gaps = dna && dna.gaps && dna.gaps.length ? `
+    <div class="gaps">
+      <h3>Site readiness — fix these before scaling spend</h3>
+      <ul>${dna.gaps.map(g => `<li>${esc(g)}</li>`).join("")}</ul>
+    </div>` : "";
+
+  let body = "";
+  if (run.state === "failed") {
+    body = `<p class="err">${esc(run.error || "Run failed.")}</p>`;
+  } else if (!artifacts.package) {
+    body = `<p class="step"><span class="spin"></span> working&hellip; current step: <b>${esc(run.step || "starting")}</b></p>`;
+  } else {
+    const pkg = artifacts.package;
+    const sorted = [...pkg.scored_ads].sort((a, b) => b.composite - a.composite);
+    const tabs = `
+      <div class="tabs">
+        <button data-tab="ads" class="${activeTab === "ads" ? "active" : ""}">Ads (${pkg.launch_ready_count} ready / ${pkg.blocked_count} blocked)</button>
+        <button data-tab="report" class="${activeTab === "report" ? "active" : ""}">Report</button>
+        <button data-tab="dna" class="${activeTab === "dna" ? "active" : ""}">Brand DNA</button>
+      </div>`;
+    let pane = "";
+    if (activeTab === "ads") {
+      const gen = (artifacts.images && artifacts.images.generated) || 0;
+      const imageBar = health.images_configured ? `
+        <div class="img-bar">
+          <button id="gen-images">${gen ? "Regenerate creative images" : "Generate creative images"}</button>
+          <span class="note">${gen
+            ? `${gen} image(s) generated with ${esc((artifacts.images && artifacts.images.model) || "OpenAI")}. These ship to Meta at launch.`
+            : "Generate AI creative for the launch-ready ads so you can review the real images before pushing to Meta. Creative is ~70% of Meta performance."}</span>
+          <span class="err2" id="img-error"></span>
+        </div>` : `
+        <div class="img-bar"><span class="note">Set <code>ADENGINE_IMAGE_PROVIDER=openai</code> + <code>OPENAI_API_KEY</code> on the server to generate AI creative images here.</span></div>`;
+      pane = imageBar + `<div class="cards">${sorted.map(s => adCard(s, run.run_id, artifacts.images)).join("")}</div>`;
+    }
+    else if (activeTab === "report") pane = `<div id="report-md">${artifacts.report ? renderMarkdown(artifacts.report) : "<p>Report not ready.</p>"}</div>`;
+    else pane = `<pre class="raw">${esc(JSON.stringify(dna, null, 2))}</pre>`;
+    let launchPanel = "";
+    if (artifacts.launch) {
+      const L = artifacts.launch;
+      const ids = Object.entries(L.ad_ids || {}).map(([k, v]) => `${k}→${v}`).join(", ");
+      const notes = (L.notes || []).map(n => `<li>${esc(n)}</li>`).join("");
+      launchPanel = `
+        <div class="launch-done">
+          ✅ Pushed to Meta — campaign <b>${esc(L.campaign_id)}</b>
+          · objective <b>${esc((L.objective || "").replace("OUTCOME_", ""))}</b>
+          · ${Object.keys(L.ad_ids || {}).length} ads
+          ${L.images_generated ? `· ${L.images_generated} AI images` : ""}
+          · status <b>PAUSED</b>.
+          <a href="${esc(L.ads_manager_url || "https://adsmanager.facebook.com")}" target="_blank">Review &amp; activate in Ads Manager →</a>
+          <div class="ids">${esc(ids)}</div>
+          ${notes ? `<ul class="ids">${notes}</ul>` : ""}
+        </div>
+        <div class="launch-meta">
+          <label>Target CPA $</label>
+          <input type="number" id="target-cpa" placeholder="e.g. 30" min="1" step="1">
+          <button id="check-perf">Check performance</button>
+          <button id="apply-perf" title="Pause clear losers and shift budget (±20%) toward winners">Apply recommended actions</button>
+          <span class="note">Reads live Insights (last 7 days). <b>Check</b> only recommends; <b>Apply</b> pauses losing ads and makes bounded budget shifts toward winners. Tip: hit this on a schedule with a Railway cron calling <code>POST /runs/&lt;id&gt;/optimize</code>.</span>
+          <span class="err2" id="perf-error"></span>
+          <div id="perf-result" style="flex-basis:100%"></div>
+        </div>`;
+    } else if (pkg.launch_ready_count > 0) {
+      const opt = [];
+      if (health.pixel_configured) opt.push("conversion-optimized");
+      if (health.app_id_configured) opt.push("app-install ready");
+      if (health.images_configured) opt.push("AI creative images");
+      const optNote = opt.length ? ` Active: <b>${opt.join(", ")}</b>.` : "";
+      launchPanel = `
+        <div class="launch-meta">
+          <label>Daily budget $</label>
+          <input type="number" id="budget" value="20" min="1" step="1">
+          <label>Country</label>
+          <input type="text" id="country" value="US" maxlength="2" style="width:54px">
+          <label title="One adset per top ad (max 5) — isolates Meta's learning so the winner emerges fast"><input type="checkbox" id="split" checked> A/B split</label>
+          <button id="push-meta" ${health.meta_configured ? "" : "disabled title='Set META_* server variables to enable'"}>Push ${pkg.launch_ready_count} ads to Meta</button>
+          <span class="note">Creates the campaign, adset, and ads <b>PAUSED</b> — nothing spends until you activate it in Ads Manager. Objective is chosen from the brand's conversion path; destination links are tagged for attribution.${optNote}${health.meta_configured ? "" : " <b>Meta not configured</b> — set META_ACCESS_TOKEN / META_AD_ACCOUNT_ID / META_PAGE_ID."}</span>
+          <span class="err2" id="launch-error"></span>
+        </div>`;
+    }
+    body = tabs + pane + launchPanel + `
+      <p class="dl">Raw artifacts:
+        <a href="/runs/${esc(run.run_id)}/artifacts/brand_dna" target="_blank">brand_dna.json</a> ·
+        <a href="/runs/${esc(run.run_id)}/artifacts/ads" target="_blank">ads.json</a> ·
+        <a href="/runs/${esc(run.run_id)}/artifacts/scored_package" target="_blank">scored_package.json</a> ·
+        <a href="/runs/${esc(run.run_id)}/report" target="_blank">report.md</a></p>`;
+  }
+
+  detail.innerHTML = `
+    <div class="head">
+      <h2>${esc(dna ? dna.business_name : run.run_id)}</h2>
+      ${badge(run.state)}
+      <span class="step">${esc(run.url || "")}</span>
+    </div>
+    ${gaps}${body}`;
+  detail.querySelectorAll(".tabs button").forEach(btn =>
+    btn.addEventListener("click", () => { activeTab = btn.dataset.tab; renderDetail(run); }));
+
+  const genBtn = $("#gen-images", detail);
+  if (genBtn) genBtn.addEventListener("click", async () => {
+    const regen = (artifacts.images && artifacts.images.generated) > 0;
+    genBtn.disabled = true;
+    genBtn.textContent = "Generating… (this can take ~30–60s)";
+    $("#img-error", detail).textContent = "";
+    try {
+      const manifest = await api(`/runs/${run.run_id}/images`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ force: regen }),
+      });
+      // bust the <img> cache so regenerated images actually refresh
+      const stamp = Date.now();
+      if (manifest.ads) for (const k in manifest.ads) manifest.ads[k]._cachebust = stamp;
+      delete detailCache[run.run_id];
+      const fresh = await loadArtifacts(run);
+      fresh.images = manifest;  // ensure cachebust + latest even if disk lags
+      detailCache[run.run_id] = fresh;
+      activeTab = "ads";
+      renderDetail(run);
+    } catch (e) {
+      $("#img-error", detail).textContent = e.message;
+      genBtn.disabled = false;
+      genBtn.textContent = "Generate creative images";
+    }
+  });
+
+  const refreshImages = async (manifest) => {
+    const stamp = Date.now();
+    if (manifest && manifest.ads) for (const k in manifest.ads) manifest.ads[k]._cachebust = stamp;
+    delete detailCache[run.run_id];
+    const fresh = await loadArtifacts(run);
+    if (manifest) fresh.images = { ...(fresh.images || {}), ...manifest, ads: { ...((fresh.images || {}).ads || {}), ...(manifest.ads || {}) } };
+    if (fresh.images && fresh.images.ads) for (const k in fresh.images.ads) fresh.images.ads[k]._cachebust = stamp;
+    detailCache[run.run_id] = fresh;
+    activeTab = "ads";
+    renderDetail(run);
+  };
+
+  detail.querySelectorAll("input[data-upload]").forEach(input =>
+    input.addEventListener("change", async () => {
+      const adId = input.dataset.upload;
+      const errEl = detail.querySelector(`[data-uperr="${adId}"]`);
+      if (errEl) errEl.textContent = "";
+      const file = input.files[0];
+      if (!file) return;
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        const res = await fetch(`/runs/${run.run_id}/images/${adId}/upload`, { method: "POST", body: form });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+        await refreshImages(null);
+      } catch (e) {
+        if (errEl) errEl.textContent = e.message;
+      }
+    }));
+
+  detail.querySelectorAll("[data-remove]").forEach(btn =>
+    btn.addEventListener("click", async () => {
+      try {
+        await api(`/runs/${run.run_id}/images/${btn.dataset.remove}`, { method: "DELETE" });
+        await refreshImages(null);
+      } catch (e) {
+        const errEl = detail.querySelector(`[data-uperr="${btn.dataset.remove}"]`);
+        if (errEl) errEl.textContent = e.message;
+      }
+    }));
+
+  const pushBtn = $("#push-meta", detail);
+  if (pushBtn) pushBtn.addEventListener("click", async () => {
+    pushBtn.disabled = true;
+    pushBtn.textContent = "Pushing…";
+    $("#launch-error", detail).textContent = "";
+    try {
+      await api(`/runs/${run.run_id}/launch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          daily_budget_usd: parseFloat($("#budget", detail).value) || 20,
+          country: ($("#country", detail).value || "US").toUpperCase(),
+          split: $("#split", detail) ? $("#split", detail).checked : true,
+        }),
+      });
+      delete detailCache[run.run_id];
+      await refresh();
+    } catch (e) {
+      $("#launch-error", detail).textContent = e.message;
+      pushBtn.disabled = false;
+      pushBtn.textContent = `Push ${run.launch_ready ?? ""} ads to Meta`;
+    }
+  });
+
+  const wirePerf = (btnId, apply) => {
+    const btn = $(btnId, detail);
+    if (!btn) return;
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      $("#perf-error", detail).textContent = "";
+      try {
+        const cpa = parseFloat($("#target-cpa", detail).value);
+        const rec = await api(`/runs/${run.run_id}/optimize`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ apply, target_cpa_usd: isNaN(cpa) ? null : cpa }),
+        });
+        $("#perf-result", detail).innerHTML = renderPerf(rec);
+      } catch (e) {
+        $("#perf-error", detail).textContent = e.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  };
+  wirePerf("#check-perf", false);
+  wirePerf("#apply-perf", true);
+}
+
+function renderPerf(rec) {
+  const money = c => c == null ? "—" : `$${(c / 100).toFixed(2)}`;
+  const rows = (rec.snapshots || []).map(s => `
+    <tr><td>${esc(s.ad_id)}</td><td align="right">${s.impressions.toLocaleString()}</td><td align="right">${s.clicks}</td>
+    <td align="right">${s.ctr != null ? (s.ctr * 100).toFixed(2) + "%" : "—"}</td><td align="right">${money(s.spend_cents)}</td>
+    <td align="right">${s.conversions}</td><td align="right">${money(s.cpa_cents)}</td><td align="right">${s.frequency ?? "—"}</td></tr>`).join("");
+  const decisions = (rec.decisions || []).map(d =>
+    `<li><b>${esc(d.action)}</b> ${esc(d.ad_id)} — ${esc(d.reason)}</li>`).join("");
+  const applied = (rec.applied || []).map(a =>
+    `<li>${a.ok ? "✅" : "⏸"} <b>${esc(a.action)}</b> ${esc(a.ad_id)} — ${esc(a.detail)}</li>`).join("");
+  if (!rows) return `<p class="step">No delivery data yet — Meta reports nothing until the campaign is active and serving.</p>`;
+  return `
+    <table style="border-collapse:collapse;width:100%;font-size:13px;margin-top:10px">
+      <tr style="color:var(--muted)"><th align="left">ad</th><th align="right">impr</th><th align="right">clicks</th><th align="right">CTR</th><th align="right">spend</th><th align="right">conv</th><th align="right">CPA</th><th align="right">freq</th></tr>
+      ${rows}
+    </table>
+    ${decisions ? `<p style="margin:10px 0 4px"><b>Recommended:</b></p><ul style="margin:0;padding-left:20px;font-size:13px">${decisions}</ul>` : `<p class="step" style="margin-top:10px">No actions recommended — keep collecting data.</p>`}
+    ${applied ? `<p style="margin:10px 0 4px"><b>Applied:</b></p><ul style="margin:0;padding-left:20px;font-size:13px">${applied}</ul>` : ""}`;
+}
+
+api("/healthz").then(h => { health = h; }).catch(() => {});
+refresh();
+</script>
+</body>
+</html>
